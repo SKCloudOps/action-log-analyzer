@@ -38,7 +38,6 @@ exports.analyzeLogs = analyzeLogs;
 const fs = __importStar(require("fs"));
 const path = __importStar(require("path"));
 const core = __importStar(require("@actions/core"));
-const ai_1 = require("./ai");
 // Strip GitHub Actions log timestamps and ANSI color codes
 function cleanLine(raw) {
     return raw
@@ -106,7 +105,7 @@ function extractFailedStep(lines) {
     }
     return null;
 }
-async function analyzeLogs(logs, patterns, token, useAI, stepName) {
+async function analyzeLogs(logs, patterns, stepName) {
     const rawLines = logs.split('\n');
     const totalLines = rawLines.length;
     const errorLines = [];
@@ -140,33 +139,12 @@ async function analyzeLogs(logs, patterns, token, useAI, stepName) {
                     totalLines,
                     severity: p.severity,
                     matchedPattern: p.id,
-                    category: p.category,
-                    aiGenerated: false
+                    category: p.category
                 };
             }
         }
     }
-    // Tier 2 — GitHub Models AI fallback
-    if (useAI && errorLines.length > 0) {
-        core.info('⚠️ No pattern matched — trying GitHub Models AI fallback...');
-        const aiResult = await (0, ai_1.getAISuggestion)(errorLines, token);
-        if (aiResult) {
-            return {
-                rootCause: aiResult.rootCause,
-                failedStep: stepName || extractFailedStep(rawLines) || 'Unknown step',
-                suggestion: `${aiResult.suggestion} *(AI-generated, confidence: ${aiResult.confidence})*`,
-                errorLines,
-                exactMatchLine: errorLines[0] || '',
-                exactMatchLineNumber: 0,
-                totalLines,
-                severity: 'warning',
-                matchedPattern: 'ai-generated',
-                category: 'AI Analysis',
-                aiGenerated: true
-            };
-        }
-    }
-    // Tier 3 — generic fallback
+    // No pattern matched — generic fallback
     return {
         rootCause: 'Unknown failure — could not automatically detect root cause',
         failedStep: stepName || extractFailedStep(rawLines) || 'Unknown step',
@@ -177,7 +155,6 @@ async function analyzeLogs(logs, patterns, token, useAI, stepName) {
         totalLines,
         severity: 'warning',
         matchedPattern: 'none',
-        category: 'Unknown',
-        aiGenerated: false
+        category: 'Unknown'
     };
 }

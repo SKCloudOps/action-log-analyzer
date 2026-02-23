@@ -29922,109 +29922,6 @@ function wrappy (fn, cb) {
 
 /***/ }),
 
-/***/ 2382:
-/***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
-
-"use strict";
-
-var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    var desc = Object.getOwnPropertyDescriptor(m, k);
-    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
-      desc = { enumerable: true, get: function() { return m[k]; } };
-    }
-    Object.defineProperty(o, k2, desc);
-}) : (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    o[k2] = m[k];
-}));
-var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
-    Object.defineProperty(o, "default", { enumerable: true, value: v });
-}) : function(o, v) {
-    o["default"] = v;
-});
-var __importStar = (this && this.__importStar) || (function () {
-    var ownKeys = function(o) {
-        ownKeys = Object.getOwnPropertyNames || function (o) {
-            var ar = [];
-            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
-            return ar;
-        };
-        return ownKeys(o);
-    };
-    return function (mod) {
-        if (mod && mod.__esModule) return mod;
-        var result = {};
-        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
-        __setModuleDefault(result, mod);
-        return result;
-    };
-})();
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.getAISuggestion = getAISuggestion;
-const core = __importStar(__nccwpck_require__(7484));
-async function getAISuggestion(errorLines, token) {
-    try {
-        core.info('🤖 No pattern matched — calling GitHub Models AI for analysis...');
-        const logSample = errorLines.slice(0, 50).join('\n');
-        const prompt = `You are a CI/CD pipeline expert. Analyze the following pipeline failure log lines and provide:
-1. A plain-English root cause (1 sentence, no jargon)
-2. A specific, actionable fix suggestion (2-3 sentences max)
-3. A confidence level: high, medium, or low
-
-Respond ONLY in this JSON format, nothing else:
-{
-  "rootCause": "...",
-  "suggestion": "...",
-  "confidence": "high|medium|low"
-}
-
-Pipeline failure log:
-\`\`\`
-${logSample}
-\`\`\``;
-        const response = await fetch('https://models.github.ai/inference/chat/completions', {
-            method: 'POST',
-            headers: {
-                'Accept': 'application/vnd.github+json',
-                'Authorization': `Bearer ${token}`,
-                'X-GitHub-Api-Version': '2022-11-28',
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({
-                model: 'openai/gpt-4o-mini',
-                messages: [{ role: 'user', content: prompt }],
-                max_tokens: 300,
-                temperature: 0.2
-            }),
-            signal: AbortSignal.timeout(10000)
-        });
-        if (!response.ok) {
-            const errorText = await response.text();
-            core.warning(`⚠️ GitHub Models API returned ${response.status}: ${errorText}`);
-            return null;
-        }
-        // Cast to unknown first, then to our interface — fixes TS2322
-        const data = await response.json();
-        const content = data.choices?.[0]?.message?.content?.trim();
-        if (!content) {
-            core.warning('⚠️ GitHub Models returned empty response');
-            return null;
-        }
-        const clean = content.replace(/```json|```/g, '').trim();
-        const parsed = JSON.parse(clean);
-        core.info(`🤖 AI analysis complete — confidence: ${parsed.confidence}`);
-        return parsed;
-    }
-    catch (err) {
-        core.warning(`⚠️ GitHub Models AI fallback failed: ${err}`);
-        return null;
-    }
-}
-
-
-/***/ }),
-
 /***/ 8561:
 /***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
 
@@ -30069,7 +29966,6 @@ exports.analyzeLogs = analyzeLogs;
 const fs = __importStar(__nccwpck_require__(9896));
 const path = __importStar(__nccwpck_require__(6928));
 const core = __importStar(__nccwpck_require__(7484));
-const ai_1 = __nccwpck_require__(2382);
 // Strip GitHub Actions log timestamps and ANSI color codes
 function cleanLine(raw) {
     return raw
@@ -30137,7 +30033,7 @@ function extractFailedStep(lines) {
     }
     return null;
 }
-async function analyzeLogs(logs, patterns, token, useAI, stepName) {
+async function analyzeLogs(logs, patterns, stepName) {
     const rawLines = logs.split('\n');
     const totalLines = rawLines.length;
     const errorLines = [];
@@ -30171,33 +30067,12 @@ async function analyzeLogs(logs, patterns, token, useAI, stepName) {
                     totalLines,
                     severity: p.severity,
                     matchedPattern: p.id,
-                    category: p.category,
-                    aiGenerated: false
+                    category: p.category
                 };
             }
         }
     }
-    // Tier 2 — GitHub Models AI fallback
-    if (useAI && errorLines.length > 0) {
-        core.info('⚠️ No pattern matched — trying GitHub Models AI fallback...');
-        const aiResult = await (0, ai_1.getAISuggestion)(errorLines, token);
-        if (aiResult) {
-            return {
-                rootCause: aiResult.rootCause,
-                failedStep: stepName || extractFailedStep(rawLines) || 'Unknown step',
-                suggestion: `${aiResult.suggestion} *(AI-generated, confidence: ${aiResult.confidence})*`,
-                errorLines,
-                exactMatchLine: errorLines[0] || '',
-                exactMatchLineNumber: 0,
-                totalLines,
-                severity: 'warning',
-                matchedPattern: 'ai-generated',
-                category: 'AI Analysis',
-                aiGenerated: true
-            };
-        }
-    }
-    // Tier 3 — generic fallback
+    // No pattern matched — generic fallback
     return {
         rootCause: 'Unknown failure — could not automatically detect root cause',
         failedStep: stepName || extractFailedStep(rawLines) || 'Unknown step',
@@ -30208,8 +30083,7 @@ async function analyzeLogs(logs, patterns, token, useAI, stepName) {
         totalLines,
         severity: 'warning',
         matchedPattern: 'none',
-        category: 'Unknown',
-        aiGenerated: false
+        category: 'Unknown'
     };
 }
 
@@ -30238,36 +30112,35 @@ function formatPRComment(analysis, jobName, runUrl) {
     const emoji = SEVERITY_EMOJI[analysis.severity];
     const label = SEVERITY_LABEL[analysis.severity];
     const exactMatchBlock = analysis.exactMatchLine
-        ? `\n### 🎯 Exact Error Line ${analysis.exactMatchLineNumber > 0 ? `*(line ${analysis.exactMatchLineNumber} of ${analysis.totalLines})*` : ''}
-\`\`\`
+        ? `\n#### Error Output
+${analysis.exactMatchLineNumber > 0 ? `*Line ${analysis.exactMatchLineNumber} of ${analysis.totalLines}*  \n` : ''}\`\`\`text
 ${analysis.exactMatchLine}
 \`\`\``
         : '';
     const errorBlock = analysis.errorLines.length > 0
-        ? `\n<details>\n<summary>📋 All error lines detected (${analysis.errorLines.length})</summary>\n\n\`\`\`\n${analysis.errorLines.join('\n')}\n\`\`\`\n</details>`
+        ? `\n<details>\n<summary>View ${analysis.errorLines.length} detected error line${analysis.errorLines.length === 1 ? '' : 's'}</summary>\n\n\`\`\`text\n${analysis.errorLines.join('\n')}\n\`\`\`\n</details>`
         : '';
-    const aiNote = analysis.aiGenerated
-        ? `\n> 🤖 *This analysis was generated by GitHub Models AI*\n`
-        : '';
-    return `## ${emoji} Action Log Analyzer — Failure Analysis
+    return `## Pipeline Failure Analysis
 
-> **Job:** \`${jobName}\` · **Severity:** ${label} · **Scanned:** ${analysis.totalLines} log lines · [View full logs](${runUrl})
+| | |
+|:--|:--|
+| **Job** | \`${jobName}\` |
+| **Severity** | ${emoji} ${label} |
+| **Logs** | [View full workflow run](${runUrl}) |
 
----
+> [!CAUTION]
+> **Root Cause**
+> ${analysis.rootCause}
 
-### 🔍 Root Cause
-${analysis.rootCause}
-${aiNote}
-### 📍 Failed Step
-\`${analysis.failedStep}\`
-${exactMatchBlock}
+**Failed Step:** \`${analysis.failedStep}\`${exactMatchBlock}
 
-### 💡 Suggested Fix
-${analysis.suggestion}
+> [!TIP]
+> **Suggested Fix**
+> ${analysis.suggestion}
 ${errorBlock}
 
 ---
-<sub>🔬 Analyzed by [Action Log Analyzer](https://github.com/SKCloudOps/action-log-analyzer) · [Report false positive](https://github.com/SKCloudOps/action-log-analyzer/issues)</sub>`;
+*[Action Log Analyzer](https://github.com/SKCloudOps/action-log-analyzer) · [Report issue](https://github.com/SKCloudOps/action-log-analyzer/issues)*`;
 }
 function formatJobSummary(analysis, jobName, runUrl, steps, triggeredBy, branch, commit, repo) {
     const emoji = SEVERITY_EMOJI[analysis.severity];
@@ -30283,7 +30156,7 @@ function formatJobSummary(analysis, jobName, runUrl, steps, triggeredBy, branch,
             ? `${Math.round((new Date(step.completed_at).getTime() - new Date(step.started_at).getTime()) / 1000)}s`
             : '—';
         const isFailedStep = step.name === analysis.failedStep
-            ? ' ← **failure here**'
+            ? ' *(failed)*'
             : '';
         return `| ${icon} | \`${step.name}\` | ${step.conclusion ?? 'in progress'} | ${duration} |${isFailedStep}`;
     }).join('\n');
@@ -30291,83 +30164,73 @@ function formatJobSummary(analysis, jobName, runUrl, steps, triggeredBy, branch,
     const topErrorLines = analysis.errorLines
         .slice(0, 10)
         .join('\n');
-    const aiNote = analysis.aiGenerated
-        ? `> 🤖 This suggestion was generated by **GitHub Models AI** (confidence: see suggestion)\n\n`
-        : `> 🎯 Matched pattern: \`${analysis.matchedPattern}\` · Category: \`${analysis.category}\`\n\n`;
-    return `# ${emoji} Action Log Analyzer — Failure Report
+    const patternMeta = `Pattern: \`${analysis.matchedPattern}\` · Category: \`${analysis.category}\``;
+    return `# Pipeline Failure Report
 
----
+## Summary
 
-## 📊 Run Overview
+| Property | Value |
+|:---------|:------|
+| Repository | \`${repo}\` |
+| Branch | \`${branch}\` |
+| Commit | [\`${commit.substring(0, 7)}\`](https://github.com/${repo}/commit/${commit}) |
+| Triggered by | \`${triggeredBy}\` |
+| Job | \`${jobName}\` |
+| Severity | ${emoji} ${label} |
+| Log lines scanned | ${analysis.totalLines.toLocaleString()} |
+| Analyzed | ${now} |
 
-| | |
-|---|---|
-| **Repository** | \`${repo}\` |
-| **Branch** | \`${branch}\` |
-| **Commit** | [\`${commit.substring(0, 7)}\`](https://github.com/${repo}/commit/${commit}) |
-| **Triggered By** | \`${triggeredBy}\` |
-| **Job** | \`${jobName}\` |
-| **Severity** | ${emoji} ${label} |
-| **Log Lines Scanned** | ${analysis.totalLines.toLocaleString()} lines |
-| **Analyzed At** | ${now} |
-| **Full Logs** | [View on GitHub Actions ↗](${runUrl}) |
+> [!CAUTION]
+> **Root Cause**
+> ${analysis.rootCause}
+>
+> *${patternMeta}*
 
----
+**Failed Step:** \`${analysis.failedStep}\`
 
-## 🔍 Root Cause
-
-> ### ${analysis.rootCause}
-
-${aiNote}
-
----
-
-## 🎯 Exact Error
+### Error Output
 
 ${analysis.exactMatchLineNumber > 0
-        ? `Found on **line ${analysis.exactMatchLineNumber}** of ${analysis.totalLines.toLocaleString()}:`
-        : 'Top error line detected:'}
+        ? `Line ${analysis.exactMatchLineNumber} of ${analysis.totalLines.toLocaleString()}:`
+        : 'Detected error:'}
 
-\`\`\`
+\`\`\`text
 ${analysis.exactMatchLine || 'No exact match found'}
 \`\`\`
 
----
-
-## 💡 Suggested Fix
-
-${analysis.suggestion}
+> [!TIP]
+> **Suggested Fix**
+> ${analysis.suggestion}
 
 ---
 
-## 🗂️ Step Breakdown
+## Step Breakdown
 
 | Status | Step | Result | Duration |
-|---|---|---|---|
+|:------:|:-----|:-------|:---------|
 ${stepRows}
 
 ---
 
-## 📋 Error Lines (top 10 of ${analysis.errorLines.length})
+## Error Lines (showing 10 of ${analysis.errorLines.length})
 
-\`\`\`
+\`\`\`text
 ${topErrorLines || 'No error lines captured'}
 \`\`\`
 
 ---
 
-## 🛠️ Quick Actions
+## Links
 
-| Action | Link |
-|---|---|
-| 🔗 View full workflow run | [Open ↗](${runUrl}) |
-| 📋 Add custom pattern | [patterns.json ↗](https://github.com/${repo}/blob/main/patterns.json) |
-| 🐛 Report false positive | [Open issue ↗](https://github.com/SKCloudOps/action-log-analyzer/issues) |
-| 📖 Documentation | [README ↗](https://github.com/SKCloudOps/action-log-analyzer#readme) |
+| Action | |
+|:-------|:--|
+| View workflow run | [Open logs](${runUrl}) |
+| Add custom pattern | [patterns.json](https://github.com/${repo}/blob/main/patterns.json) |
+| Report issue | [Open issue](https://github.com/SKCloudOps/action-log-analyzer/issues) |
+| Documentation | [README](https://github.com/SKCloudOps/action-log-analyzer#readme) |
 
 ---
-
-<sub>🔬 Analyzed by <a href="https://github.com/SKCloudOps/action-log-analyzer">Action Log Analyzer</a> · ${now}</sub>`;
+*Action Log Analyzer · ${now}*`;
 }
 
 
@@ -30423,12 +30286,10 @@ async function run() {
         const postSummary = core.getInput('post-summary') === 'true';
         const failedJobName = core.getInput('failed-job-name');
         const remotePatternsUrl = core.getInput('remote-patterns-url');
-        const enableAI = core.getInput('enable-ai') === 'true';
         const octokit = github.getOctokit(token);
         const context = github.context;
         const { owner, repo } = context.repo;
         core.info('🔍 Action Log Analyzer: Starting failure analysis...');
-        core.info(`🤖 AI fallback: ${enableAI ? 'enabled (GitHub Models)' : 'disabled'}`);
         // Load patterns — local + optional remote
         const patterns = await (0, analyzer_1.loadPatterns)(remotePatternsUrl || undefined);
         const runId = context.runId;
@@ -30468,19 +30329,17 @@ async function run() {
                     .join('\n') || '';
             }
             const failedStep = job.steps?.find(s => s.conclusion === 'failure')?.name;
-            // Analyze — pattern match first, AI fallback if enabled and no match
-            const analysis = await (0, analyzer_1.analyzeLogs)(logs, patterns, token, enableAI, failedStep);
+            // Analyze using pattern matching
+            const analysis = await (0, analyzer_1.analyzeLogs)(logs, patterns, failedStep);
             core.info(`🔍 Root cause: ${analysis.rootCause}`);
             core.info(`📦 Category: ${analysis.category}`);
             core.info(`🎯 Matched pattern: ${analysis.matchedPattern}`);
-            core.info(`🤖 AI generated: ${analysis.aiGenerated}`);
             // Set outputs
             core.setOutput('root-cause', analysis.rootCause);
             core.setOutput('failed-step', analysis.failedStep);
             core.setOutput('suggestion', analysis.suggestion);
             core.setOutput('matched-pattern', analysis.matchedPattern);
             core.setOutput('category', analysis.category);
-            core.setOutput('ai-generated', String(analysis.aiGenerated));
             // Post job summary
             if (postSummary) {
                 const summary = (0, formatter_1.formatJobSummary)(analysis, job.name, runUrl, job.steps ?? [], triggeredBy, branch, commit, repoFullName);
@@ -30494,7 +30353,7 @@ async function run() {
                 const { data: comments } = await octokit.rest.issues.listComments({
                     owner, repo, issue_number: prNumber
                 });
-                const existingComment = comments.find(c => c.body?.includes('Action Log Analyzer — Failure Analysis') &&
+                const existingComment = comments.find(c => c.body?.includes('Pipeline Failure Analysis') &&
                     c.body?.includes(job.name));
                 if (existingComment) {
                     await octokit.rest.issues.updateComment({
