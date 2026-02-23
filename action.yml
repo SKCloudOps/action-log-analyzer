@@ -39,6 +39,12 @@ outputs:
     description: 'ID of the pattern that matched (or none)'
   category:
     description: 'Category of the failure'
+  warning-count:
+    description: 'Number of warnings detected in the job logs'
+  build-params:
+    description: 'JSON array of detected build parameters [{key, value, source}]'
+  git-refs:
+    description: 'JSON array of detected repositories, actions, and tags [{repo, ref, type}]'
 
 runs:
   using: 'node20'

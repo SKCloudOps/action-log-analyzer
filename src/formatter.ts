@@ -1,4 +1,4 @@
-import { FailureAnalysis } from './analyzer'
+import { FailureAnalysis, BuildParam, GitRef } from './analyzer'
 
 const MAX_ERROR_LINES = 10
 
@@ -126,6 +126,85 @@ const SEVERITY_EMOJI = {
   info: '🔵'
 }
 
+function buildWarningsSection(
+  warningLines: string[],
+  warningLinesByCategory: Record<string, string[]>,
+  maxLines: number
+): string {
+  if (warningLines.length === 0) return ''
+
+  const categories = Object.keys(warningLinesByCategory).sort()
+  const parts: string[] = []
+  let linesShown = 0
+  const truncated = warningLines.length > maxLines
+
+  for (const cat of categories) {
+    const lines = warningLinesByCategory[cat]
+    const remaining = maxLines - linesShown
+    const showLines = truncated ? lines.slice(0, Math.min(lines.length, Math.max(0, remaining))) : lines
+    const hidden = lines.length - showLines.length
+
+    const content = showLines.map(line => `   ${line}`).join('\n')
+    const suffix = hidden > 0 ? `\n   ... ${hidden} more` : ''
+    const header = hidden > 0 ? `${cat} (${showLines.length}/${lines.length})` : `${cat} (${lines.length})`
+
+    parts.push(`<details>
+<summary>${header}</summary>
+
+\`\`\`text
+${content}${suffix}
+\`\`\`
+</details>`)
+    linesShown += showLines.length
+    if (linesShown >= maxLines && truncated) break
+  }
+
+  return parts.join('\n\n')
+}
+
+function buildBuildParamsSection(params: BuildParam[]): string {
+  if (params.length === 0) return ''
+
+  const rows = params.map(p => {
+    const displayValue = p.value.length > 60 ? p.value.slice(0, 57) + '...' : p.value
+    return `| \`${p.key}\` | \`${displayValue}\` | ${p.source} |`
+  })
+
+  return `| Parameter | Value | Source |
+|:----------|:------|:-------|
+${rows.join('\n')}`
+}
+
+function buildGitRefsSection(refs: GitRef[]): string {
+  if (refs.length === 0) return ''
+
+  const typeLabels: Record<string, string> = {
+    action: 'Action',
+    docker: 'Docker',
+    'git-checkout': 'Git',
+    submodule: 'Submodule'
+  }
+  const typeEmojis: Record<string, string> = {
+    action: '🔧',
+    docker: '🐳',
+    'git-checkout': '🔀',
+    submodule: '📦'
+  }
+
+  const rows = refs.map(r => {
+    const emoji = typeEmojis[r.type] || '📌'
+    const label = typeLabels[r.type] || r.type
+    const repoDisplay = r.repo
+      ? (r.type === 'action' ? `[${r.repo}](https://github.com/${r.repo})` : `\`${r.repo}\``)
+      : '—'
+    return `| ${emoji} ${label} | ${repoDisplay} | \`${r.ref}\` |`
+  })
+
+  return `| Type | Repository / Image | Ref / Tag |
+|:-----|:-------------------|:----------|
+${rows.join('\n')}`
+}
+
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`
   if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`
@@ -170,7 +249,8 @@ export function formatPRComment(
   branch: string,
   commit: string,
   artifacts: { name: string; size_in_bytes: number }[] = [],
-  extractedLinks: { url: string; label?: string }[] = []
+  extractedLinks: { url: string; label?: string }[] = [],
+  gitRefs: GitRef[] = []
 ): string {
   const passedCount = steps.filter(s => s.conclusion === 'success').length
   const totalCount = steps.length
@@ -224,7 +304,16 @@ ${exactMatchLine}
 ### Suggested Fix
 ${analysis.suggestion}${docsLink}
 ${errorBlock}
-
+${analysis.warningLines.length > 0 ? `
+### Warnings (${analysis.warningLines.length})
+${buildWarningsSection(analysis.warningLines, analysis.warningLinesByCategory, 10)}
+` : ''}${analysis.buildParams.length > 0 ? `
+### Build Parameters
+${buildBuildParamsSection(analysis.buildParams)}
+` : ''}${gitRefs.length > 0 ? `
+### Repositories, Actions & Tags
+${buildGitRefsSection(gitRefs)}
+` : ''}
 ### Artifacts & Links
 ${buildArtifactsAndLinksSection(runUrl, artifacts, extractedLinks, repo)}
 
@@ -242,7 +331,8 @@ export function formatJobSummary(
   commit: string,
   repo: string,
   artifacts: { name: string; size_in_bytes: number }[] = [],
-  extractedLinks: { url: string; label?: string }[] = []
+  extractedLinks: { url: string; label?: string }[] = [],
+  gitRefs: GitRef[] = []
 ): string {
   const label = SEVERITY_LABEL[analysis.severity]
   const emoji = SEVERITY_EMOJI[analysis.severity]
@@ -305,7 +395,22 @@ ${analysis.suggestion}${docsLink}
 ${buildGroupedErrorBlockSummary(analysis.errorLinesByCategory || {}, analysis.exactMatchLine, MAX_ERROR_LINES, runUrl, analysis.errorLines.length)}
 
 ---
+${analysis.warningLines.length > 0 ? `
+## Warnings (${analysis.warningLines.length})
+${buildWarningsSection(analysis.warningLines, analysis.warningLinesByCategory, MAX_ERROR_LINES)}
 
+---
+` : ''}${analysis.buildParams.length > 0 ? `
+## Build Parameters
+${buildBuildParamsSection(analysis.buildParams)}
+
+---
+` : ''}${gitRefs.length > 0 ? `
+## Repositories, Actions & Tags
+${buildGitRefsSection(gitRefs)}
+
+---
+` : ''}
 ## Artifacts & Links
 ${buildArtifactsAndLinksSection(runUrl, artifacts, extractedLinks, repo)}
 
@@ -321,7 +426,11 @@ export function formatSuccessSummary(
   commit: string,
   repo: string,
   artifacts: { name: string; size_in_bytes: number }[] = [],
-  extractedLinks: { url: string; label?: string }[] = []
+  extractedLinks: { url: string; label?: string }[] = [],
+  warningLines: string[] = [],
+  warningLinesByCategory: Record<string, string[]> = {},
+  buildParams: BuildParam[] = [],
+  gitRefs: GitRef[] = []
 ): string {
   const now = new Date().toUTCString()
 
@@ -402,7 +511,16 @@ ${jobRows}
 ${timelineSection}
 ${coverageSection}
 
-### Artifacts & Links
+${warningLines.length > 0 ? `### Warnings (${warningLines.length})
+${buildWarningsSection(warningLines, warningLinesByCategory, 10)}
+
+` : ''}${buildParams.length > 0 ? `### Build Parameters
+${buildBuildParamsSection(buildParams)}
+
+` : ''}${gitRefs.length > 0 ? `### Repositories, Actions & Tags
+${buildGitRefsSection(gitRefs)}
+
+` : ''}### Artifacts & Links
 ${buildArtifactsAndLinksSection(runUrl, artifacts, extractedLinks, repo)}
 
 ---
@@ -413,7 +531,11 @@ export function formatSuccessPRComment(
   jobNames: string[],
   runUrl: string,
   artifacts: { name: string; size_in_bytes: number }[] = [],
-  extractedLinks: { url: string; label?: string }[] = []
+  extractedLinks: { url: string; label?: string }[] = [],
+  warningLines: string[] = [],
+  warningLinesByCategory: Record<string, string[]> = {},
+  buildParams: BuildParam[] = [],
+  gitRefs: GitRef[] = []
 ): string {
   const jobsList = jobNames.map(n => `\`${n}\``).join(', ')
   let extra = `\n\n[View workflow run](${runUrl})`
@@ -434,9 +556,22 @@ export function formatSuccessPRComment(
     }
     extra = `\n\n${parts.join('\n\n')}\n\n[View workflow run & download](${runUrl})`
   }
+
+  const warningSection = warningLines.length > 0
+    ? `\n\n### Warnings (${warningLines.length})\n${buildWarningsSection(warningLines, warningLinesByCategory, 10)}`
+    : ''
+
+  const paramsSection = buildParams.length > 0
+    ? `\n\n### Build Parameters\n${buildBuildParamsSection(buildParams)}`
+    : ''
+
+  const refsSection = gitRefs.length > 0
+    ? `\n\n### Repositories, Actions & Tags\n${buildGitRefsSection(gitRefs)}`
+    : ''
+
   return `## Log Analyzer Report
 
-All jobs completed successfully: ${jobsList}${extra}
+All jobs completed successfully: ${jobsList}${warningSection}${paramsSection}${refsSection}${extra}
 
 ---
 *[Action Log Analyzer](https://github.com/SKCloudOps/action-log-analyzer) · [Report issue](https://github.com/SKCloudOps/action-log-analyzer/issues)*`

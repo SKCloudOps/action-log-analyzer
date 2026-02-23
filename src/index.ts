@@ -1,7 +1,46 @@
 import * as core from '@actions/core'
 import * as github from '@actions/github'
-import { loadPatterns, analyzeLogs } from './analyzer'
+import { loadPatterns, analyzeLogs, extractBuildParams, extractGitRefsFromLogs, extractGitRefsFromSteps, BuildParam, GitRef } from './analyzer'
 import { formatPRComment, formatJobSummary, formatSuccessSummary, formatSuccessPRComment } from './formatter'
+
+function cleanLogLine(raw: string): string {
+  return raw
+    .replace(/^\d{4}-\d{2}-\d{2}T[\d:.]+Z\s+/, '')
+    .replace(/\x1b\[[0-9;]*[mGKHF]/g, '')
+    .replace(/##\[(?:error|warning|debug|group|endgroup)\]/g, '')
+    .trim()
+}
+
+function extractWarningsFromLogs(logs: string): string[] {
+  const lines = logs.split('\n')
+  const warnings: string[] = []
+  for (const raw of lines) {
+    const cleaned = cleanLogLine(raw)
+    if (cleaned.length === 0) continue
+    if (/\bwarn(ing)?\b|WARN|⚠/i.test(cleaned) && !/^\s*\d+\s+warn(ing)?s?\s*$/i.test(cleaned)) {
+      if (!/error|failed|fatal|exception|FAIL|ERR!/i.test(cleaned)) {
+        warnings.push(cleaned)
+      }
+    }
+  }
+  return warnings
+}
+
+function categorizeWarnings(warningLines: string[]): Record<string, string[]> {
+  const byCategory: Record<string, string[]> = {}
+  for (const line of warningLines) {
+    let cat = 'General'
+    if (/deprecat/i.test(line)) cat = 'Deprecation'
+    else if (/npm\s+warn|npm\s+WARN/i.test(line)) cat = 'npm'
+    else if (/pip|python|setuptools/i.test(line)) cat = 'Python'
+    else if (/docker/i.test(line)) cat = 'Docker'
+    else if (/security|vuln/i.test(line)) cat = 'Security'
+    else if (/permission|access/i.test(line)) cat = 'Permissions'
+    if (!byCategory[cat]) byCategory[cat] = []
+    byCategory[cat].push(line)
+  }
+  return byCategory
+}
 
 function extractLinksFromLogs(logs: string): { url: string; label?: string }[] {
   const urlRegex = /https?:\/\/[^\s\)\]\>"\']+/g
@@ -71,8 +110,10 @@ async function run(): Promise<void> {
       // Only show completed jobs (exclude in-progress e.g. analyze-logs itself)
       const completedJobs = jobsData.jobs.filter(j => j.conclusion != null)
 
-      // Fetch logs from successful jobs to extract coverage/links
       let extractedLinks: { url: string; label?: string }[] = []
+      let allWarnings: string[] = []
+      let allBuildParams: BuildParam[] = []
+      let allGitRefs: GitRef[] = []
       const successfulJobs = jobsData.jobs.filter(j => j.conclusion === 'success')
       for (const job of successfulJobs.slice(0, 3)) {
         try {
@@ -80,7 +121,12 @@ async function run(): Promise<void> {
             owner, repo, job_id: job.id
           })
           const logs = logsResponse.data as unknown as string
+          const logLines = logs.split('\n')
           extractedLinks = [...extractedLinks, ...extractLinksFromLogs(logs)]
+          allWarnings = [...allWarnings, ...extractWarningsFromLogs(logs)]
+          allBuildParams = [...allBuildParams, ...extractBuildParams(logLines)]
+          allGitRefs = [...allGitRefs, ...extractGitRefsFromLogs(logLines)]
+          allGitRefs = [...allGitRefs, ...extractGitRefsFromSteps(job.steps ?? [], logs)]
           const seen = new Set<string>()
           extractedLinks = extractedLinks.filter(l => {
             if (seen.has(l.url)) return false
@@ -92,6 +138,35 @@ async function run(): Promise<void> {
         }
       }
 
+      // Deduplicate
+      allWarnings = [...new Set(allWarnings)]
+      const seenParams = new Set<string>()
+      allBuildParams = allBuildParams.filter(p => {
+        const uid = `${p.key}=${p.value}`
+        if (seenParams.has(uid)) return false
+        seenParams.add(uid)
+        return true
+      }).slice(0, 30)
+      const seenRefs = new Set<string>()
+      allGitRefs = allGitRefs.filter(r => {
+        const uid = `${r.type}:${r.repo}@${r.ref}`
+        if (seenRefs.has(uid)) return false
+        seenRefs.add(uid)
+        return true
+      }).slice(0, 40)
+
+      const warningLinesByCategory = categorizeWarnings(allWarnings)
+
+      if (allWarnings.length > 0) {
+        core.info(`Found ${allWarnings.length} warning(s) in successful job logs`)
+      }
+      if (allBuildParams.length > 0) {
+        core.info(`Detected ${allBuildParams.length} build parameter(s)`)
+      }
+      if (allGitRefs.length > 0) {
+        core.info(`Detected ${allGitRefs.length} repository/action reference(s)`)
+      }
+
       if (postSummary) {
         const successSummary = formatSuccessSummary(
           runUrl,
@@ -101,7 +176,11 @@ async function run(): Promise<void> {
           commit,
           repoFullName,
           artifacts,
-          extractedLinks
+          extractedLinks,
+          allWarnings,
+          warningLinesByCategory,
+          allBuildParams,
+          allGitRefs
         )
         await core.summary.addRaw(successSummary).write()
         core.info('Success summary posted.')
@@ -110,7 +189,7 @@ async function run(): Promise<void> {
       if (postComment && context.payload.pull_request) {
         const prNumber = context.payload.pull_request.number
         const jobNames = completedJobs.map(j => j.name)
-        const comment = formatSuccessPRComment(jobNames, runUrl, artifacts, extractedLinks)
+        const comment = formatSuccessPRComment(jobNames, runUrl, artifacts, extractedLinks, allWarnings, warningLinesByCategory, allBuildParams, allGitRefs)
 
         const { data: comments } = await octokit.rest.issues.listComments({
           owner, repo, issue_number: prNumber
@@ -139,6 +218,9 @@ async function run(): Promise<void> {
       core.setOutput('suggestion', '')
       core.setOutput('matched-pattern', 'none')
       core.setOutput('category', 'Success')
+      core.setOutput('warning-count', String(allWarnings.length))
+      core.setOutput('build-params', JSON.stringify(allBuildParams))
+      core.setOutput('git-refs', JSON.stringify(allGitRefs))
       core.info('Action Log Analyzer complete.')
       return
     }
@@ -164,29 +246,44 @@ async function run(): Promise<void> {
 
       const failedStep = job.steps?.find(s => s.conclusion === 'failure')?.name
 
-      // Analyze using pattern matching
       const analysis = await analyzeLogs(logs, patterns, failedStep)
 
-      // Extract notable URLs from logs (coverage, test results, reports, etc.)
       const extractedLinks = extractLinksFromLogs(logs)
+
+      const logLines = logs.split('\n')
+      let jobGitRefs = [
+        ...extractGitRefsFromLogs(logLines),
+        ...extractGitRefsFromSteps(job.steps ?? [], logs)
+      ]
+      const seenJobRefs = new Set<string>()
+      jobGitRefs = jobGitRefs.filter(r => {
+        const uid = `${r.type}:${r.repo}@${r.ref}`
+        if (seenJobRefs.has(uid)) return false
+        seenJobRefs.add(uid)
+        return true
+      }).slice(0, 40)
 
       core.info(`Root cause: ${analysis.rootCause}`)
       core.info(`Category: ${analysis.category}`)
       core.info(`Matched pattern: ${analysis.matchedPattern}`)
+      if (jobGitRefs.length > 0) {
+        core.info(`Detected ${jobGitRefs.length} repository/action reference(s)`)
+      }
 
-      // Set outputs
       core.setOutput('root-cause', analysis.rootCause)
       core.setOutput('failed-step', analysis.failedStep)
       core.setOutput('suggestion', analysis.suggestion)
       core.setOutput('matched-pattern', analysis.matchedPattern)
       core.setOutput('category', analysis.category)
+      core.setOutput('warning-count', String(analysis.warningLines.length))
+      core.setOutput('build-params', JSON.stringify(analysis.buildParams))
+      core.setOutput('git-refs', JSON.stringify(jobGitRefs))
 
-      // Post job summary
       if (postSummary) {
         const summary = formatJobSummary(
           analysis, job.name, runUrl,
           job.steps ?? [], triggeredBy, branch, commit, repoFullName,
-          artifacts, extractedLinks
+          artifacts, extractedLinks, jobGitRefs
         )
         await core.summary.addRaw(summary).write()
         core.info('Job summary posted.')
@@ -198,7 +295,7 @@ async function run(): Promise<void> {
         const comment = formatPRComment(
           analysis, job.name, runUrl,
           job.steps ?? [], repoFullName, branch, commit,
-          artifacts, extractedLinks
+          artifacts, extractedLinks, jobGitRefs
         )
 
         const { data: comments } = await octokit.rest.issues.listComments({
