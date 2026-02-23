@@ -56,7 +56,7 @@ You must explicitly grant the permissions Action Log Analyzer needs:
 
 | Permission | Why It's Needed |
 |---|---|
-| `actions: read` | Fetch the failed job's logs |
+| `actions: read` | Fetch job logs and list workflow artifacts |
 | `pull-requests: write` | Post the analysis comment on the PR |
 
 ---

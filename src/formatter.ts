@@ -126,6 +126,44 @@ const SEVERITY_EMOJI = {
   info: '🔵'
 }
 
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+}
+
+function buildArtifactsAndLinksSection(
+  runUrl: string,
+  artifacts: { name: string; size_in_bytes: number }[],
+  extractedLinks: { url: string; label?: string }[],
+  repo: string
+): string {
+  const parts: string[] = []
+
+  parts.push(`| Link | Description |
+|:-----|:------------|
+| [View workflow run](${runUrl}) | Full logs & artifact downloads |`)
+
+  if (artifacts.length > 0) {
+    for (const a of artifacts) {
+      parts.push(`| [\`${a.name}\`](${runUrl}) | Artifact · ${formatBytes(a.size_in_bytes)} |`)
+    }
+  }
+
+  if (extractedLinks.length > 0) {
+    for (const { url, label } of extractedLinks) {
+      const display = label || 'Extracted link'
+      const shortUrl = url.length > 55 ? url.slice(0, 52) + '…' : url
+      parts.push(`| [${display}](${url}) | ${shortUrl} |`)
+    }
+  }
+
+  parts.push(`| [Add custom pattern](https://github.com/${repo}/blob/main/patterns.json) | patterns.json |`)
+  parts.push(`| [Report issue](https://github.com/SKCloudOps/action-log-analyzer/issues) | Action Log Analyzer |`)
+
+  return parts.join('\n')
+}
+
 export function formatPRComment(
   analysis: FailureAnalysis,
   jobName: string,
@@ -133,7 +171,9 @@ export function formatPRComment(
   steps: { name: string; conclusion: string | null; started_at?: string | null; completed_at?: string | null }[],
   repo: string,
   branch: string,
-  commit: string
+  commit: string,
+  artifacts: { name: string; size_in_bytes: number }[] = [],
+  extractedLinks: { url: string; label?: string }[] = []
 ): string {
   const passedCount = steps.filter(s => s.conclusion === 'success').length
   const totalCount = steps.length
@@ -188,8 +228,11 @@ ${exactMatchLine}
 ${analysis.suggestion}${docsLink}
 ${errorBlock}
 
+### Artifacts & Links
+${buildArtifactsAndLinksSection(runUrl, artifacts, extractedLinks, repo)}
+
 ---
-[View full workflow run](${runUrl}) · [Action Log Analyzer](https://github.com/SKCloudOps/action-log-analyzer) · [Report issue](https://github.com/SKCloudOps/action-log-analyzer/issues)`
+*[Action Log Analyzer](https://github.com/SKCloudOps/action-log-analyzer)*`
 }
 
 export function formatJobSummary(
@@ -200,7 +243,9 @@ export function formatJobSummary(
   triggeredBy: string,
   branch: string,
   commit: string,
-  repo: string
+  repo: string,
+  artifacts: { name: string; size_in_bytes: number }[] = [],
+  extractedLinks: { url: string; label?: string }[] = []
 ): string {
   const label = SEVERITY_LABEL[analysis.severity]
   const emoji = SEVERITY_EMOJI[analysis.severity]
@@ -264,7 +309,8 @@ ${buildGroupedErrorBlockSummary(analysis.errorLinesByCategory || {}, analysis.ex
 
 ---
 
-[View full workflow run](${runUrl}) · [Add custom pattern](https://github.com/${repo}/blob/main/patterns.json) · [Report issue](https://github.com/SKCloudOps/action-log-analyzer/issues)
+## Artifacts & Links
+${buildArtifactsAndLinksSection(runUrl, artifacts, extractedLinks, repo)}
 
 ---
 *Action Log Analyzer · ${now}*`
@@ -276,7 +322,9 @@ export function formatSuccessSummary(
   triggeredBy: string,
   branch: string,
   commit: string,
-  repo: string
+  repo: string,
+  artifacts: { name: string; size_in_bytes: number }[] = [],
+  extractedLinks: { url: string; label?: string }[] = []
 ): string {
   const now = new Date().toUTCString()
   const jobRows = jobs.map(job => {
@@ -299,19 +347,41 @@ ${jobRows}
 | Commit | [\`${commit.substring(0, 7)}\`](https://github.com/${repo}/commit/${commit}) |
 | Triggered by | \`${triggeredBy}\` |
 
-[View workflow run](${runUrl})
+### Artifacts & Links
+${buildArtifactsAndLinksSection(runUrl, artifacts, extractedLinks, repo)}
 
 ---
 *Action Log Analyzer · ${now}*`
 }
 
-export function formatSuccessPRComment(jobNames: string[], runUrl: string): string {
+export function formatSuccessPRComment(
+  jobNames: string[],
+  runUrl: string,
+  artifacts: { name: string; size_in_bytes: number }[] = [],
+  extractedLinks: { url: string; label?: string }[] = []
+): string {
   const jobsList = jobNames.map(n => `\`${n}\``).join(', ')
+  let extra = `\n\n[View workflow run](${runUrl})`
+  if (artifacts.length > 0 || extractedLinks.length > 0) {
+    const parts: string[] = []
+    if (artifacts.length > 0) {
+      parts.push(`**Artifacts:** ${artifacts.map(a => `\`${a.name}\` (${Math.round(a.size_in_bytes / 1024)} KB)`).join(', ')}`)
+    }
+    if (extractedLinks.length > 0) {
+      const coverage = extractedLinks.filter(l => l.label === 'Coverage report')
+      if (coverage.length > 0) {
+        parts.push(`**Coverage:** ${coverage.map(l => `[${l.label}](${l.url})`).join(', ')}`)
+      }
+      const other = extractedLinks.filter(l => !l.label || l.label !== 'Coverage report')
+      if (other.length > 0) {
+        parts.push(`**Links:** ${other.slice(0, 5).map(l => `[${l.label || 'link'}](${l.url})`).join(', ')}`)
+      }
+    }
+    extra = `\n\n${parts.join('\n\n')}\n\n[View workflow run & download](${runUrl})`
+  }
   return `## Log Analyzer Report
 
-All jobs completed successfully: ${jobsList}
-
-[View workflow run](${runUrl})
+All jobs completed successfully: ${jobsList}${extra}
 
 ---
 *[Action Log Analyzer](https://github.com/SKCloudOps/action-log-analyzer) · [Report issue](https://github.com/SKCloudOps/action-log-analyzer/issues)*`
