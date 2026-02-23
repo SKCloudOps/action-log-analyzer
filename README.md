@@ -1,9 +1,17 @@
-# Action Log Analyzer
+<p align="center">
+  <img src="logo.png" alt="Action Log Analyzer" width="120" />
+</p>
 
-> CI intelligence for every run — timing, test results, root cause analysis, and full build context.
+<h1 align="center">Action Log Analyzer</h1>
 
-[![GitHub Marketplace](https://img.shields.io/badge/GitHub-Marketplace-blue?logo=github)](https://github.com/marketplace/actions/action-log-analyzer)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+<p align="center">
+  <strong>CI intelligence for every run — timing, test results, root cause analysis, and full build context.</strong>
+</p>
+
+<p align="center">
+  <a href="https://github.com/marketplace/actions/action-log-analyzer"><img src="https://img.shields.io/badge/GitHub-Marketplace-blue?logo=github" alt="GitHub Marketplace" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT" /></a>
+</p>
 
 Action Log Analyzer runs on **every workflow run** — whether jobs pass or fail. It posts a clear, actionable summary to your PR or Job Summary with timing intelligence, test result extraction, and full build documentation.
 
