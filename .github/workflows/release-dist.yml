@@ -78,8 +78,10 @@ jobs:
             \`\`\`
 
             ### What It Does
-            - Pattern-based error detection for Docker, GitHub Actions, Node.js, Kubernetes
-            - Posts plain-English root cause and fix suggestion directly on your PR`,
+            - Useful for both successes and failures — runs on every workflow
+            - Failure: root cause analysis, suggested fixes, error context
+            - Success: job status, artifacts, coverage reports and links from logs
+            - Pattern-based error detection for Docker, Node.js, Kubernetes, and more`,
               draft: false,
               prerelease: false
             })

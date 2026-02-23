@@ -1,7 +1,7 @@
 {
   "name": "action-log-analyzer",
   "version": "1.0.0",
-  "description": "Instant pipeline failure analysis — no more digging through 500 lines of logs",
+  "description": "Log analysis for every run — useful for successes and failures. Extracts coverage, artifacts, root causes, and suggested fixes.",
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc && ncc build src/index.ts -o dist",

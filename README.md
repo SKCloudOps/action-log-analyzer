@@ -1,11 +1,14 @@
 # Action Log Analyzer
 
-> Instant CI/CD pipeline failure analysis — no more digging through 500 lines of logs.
+> Log analysis for every run — useful for both **successes and failures**.
 
 [![GitHub Marketplace](https://img.shields.io/badge/GitHub-Marketplace-blue?logo=github)](https://github.com/marketplace/actions/action-log-analyzer)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-Action Log Analyzer is a GitHub Action that automatically detects the root cause of pipeline failures and posts a clear, actionable summary directly on your PR — so your team spends less time debugging and more time shipping.
+Action Log Analyzer runs on **every workflow run** — whether jobs pass or fail. It posts a clear summary to your PR or Job Summary, extracts coverage reports and important links from logs, and surfaces artifacts.
+
+- **When jobs fail:** Root cause analysis, suggested fixes, error context, and step timeline
+- **When jobs pass:** Job status, artifacts, coverage reports, and links extracted from logs
 
 **No external API keys. No extra cost. Just add one job to your workflow.**
 
@@ -13,15 +16,15 @@ Action Log Analyzer is a GitHub Action that automatically detects the root cause
 
 ## Quick Start
 
-Add this job to your existing workflow file:
+Add this job to your existing workflow file. Run on **both success and failure** for full visibility:
 
 ```yaml
-analyze-failure:
+analyze-logs:
   runs-on: ubuntu-latest
   needs: [your-build-job]   # replace with your actual job name
-  if: failure()             # only runs when a previous job fails
+  if: always()              # runs on success AND failure
   permissions:
-    actions: read           # read workflow logs
+    actions: read           # read workflow logs and list artifacts
     pull-requests: write    # post PR comment
 
   steps:
@@ -30,21 +33,31 @@ analyze-failure:
         github-token: ${{ secrets.GITHUB_TOKEN }}
 ```
 
-That's it. `GITHUB_TOKEN` is **automatically available** in every GitHub Actions workflow — no setup, no cost, no external API keys required.
+To run **only when jobs fail** (failure analysis only):
+
+```yaml
+  if: failure()
+```
+
+`GITHUB_TOKEN` is **automatically available** — no setup, no cost, no external API keys required.
 
 ---
 
-## What It Posts on Your PR
+## What It Posts
 
-When a pipeline fails, Action Log Analyzer automatically comments on the PR with a structured analysis including root cause, failed step, suggested fix, and links to full logs.
+| Scenario | What You Get |
+|:---------|:-------------|
+| **Jobs fail** | Root cause, failed step, suggested fix, error context, step timeline, artifacts, links |
+| **Jobs pass** | Job status, artifacts, coverage reports and links extracted from logs |
 
-For direct commits to `main` (no PR), the analysis appears in the **Job Summary** tab of the workflow run instead.
+Output appears in the **PR comment** and **Job Summary** tab. For commits to `main` without a PR, the summary appears in the Job Summary only.
 
 ---
 
-## How Suggestions Are Generated
+## How It Works
 
-Action Log Analyzer uses **pattern matching** (patterns.json) to detect known errors and suggest fixes. When no pattern matches, it provides a generic fallback suggesting you review the error lines and add a custom pattern for future runs.
+- **On failure:** Pattern matching (patterns.json) detects known errors and suggests fixes. When no pattern matches, it provides a generic fallback and suggests adding a custom pattern.
+- **On success:** Extracts coverage report URLs, test results, and other important links from job logs and surfaces them in the summary.
 
 ---
 
@@ -94,11 +107,11 @@ Use these in later steps to build custom notifications or integrations:
 
 | Output | Description |
 |---|---|
-| `root-cause` | Plain-English root cause |
-| `failed-step` | The step that caused the failure |
+| `root-cause` | Plain-English root cause (empty when all jobs pass) |
+| `failed-step` | The step that caused the failure (empty when all jobs pass) |
 | `suggestion` | Suggested fix |
-| `matched-pattern` | Pattern ID that matched (or `none`) |
-| `category` | Category of the failure (Docker, Node.js, etc.) |
+| `matched-pattern` | Pattern ID that matched, or `none` |
+| `category` | Category of the failure, or `Success` when all jobs pass |
 
 ### Example — Use outputs in a Slack notification
 

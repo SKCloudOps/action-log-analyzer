@@ -1,5 +1,9 @@
 # Example: How to use Action Log Analyzer in your repository
 # Add this to YOUR repo's .github/workflows/ folder
+#
+# Action Log Analyzer is useful for BOTH successes and failures:
+# - On success: job status, artifacts, coverage reports, links from logs
+# - On failure: root cause analysis, suggested fixes, error context
 
 name: CI
 
@@ -34,11 +38,11 @@ jobs:
           docker build -t myapp:${{ github.sha }} .
           docker push myapp:${{ github.sha }}
 
-  # Add Action Log Analyzer — runs only when the build job fails
-  analyze-failure:
+  # Action Log Analyzer — runs on success AND failure for full visibility
+  analyze-logs:
     runs-on: ubuntu-latest
     needs: [build]
-    if: failure()  # Only runs when a previous job fails
+    if: always()  # Use always() for both success and failure; use failure() for failures only
     permissions:
       contents: read
       actions: read        # Required to read workflow logs
@@ -46,7 +50,7 @@ jobs:
       issues: write        # Required to post PR comments
 
     steps:
-      - name: Analyze pipeline failure
+      - name: Analyze logs
         uses: SKCloudOps/action-log-analyzer@v1
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}

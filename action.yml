@@ -1,5 +1,5 @@
 name: 'Action Log Analyzer'
-description: 'Pattern-based failure log analysis — zooms into your failure logs and tells you exactly what broke'
+description: 'Log analysis for every run — useful for successes and failures. Extracts coverage, artifacts, root causes, and suggested fixes.'
 author: 'Sathish'
 
 branding:
