@@ -65,101 +65,17 @@ Output appears in the **PR comment** and **Job Summary** tab. For commits to `ma
 
 ## Architecture
 
-```mermaid
-flowchart TB
-  subgraph trigger [Workflow Trigger]
-    GHA["GitHub Actions<br/>Workflow Run"]
-  end
+<p align="center">
+  <img src="architecture.png" alt="Action Log Analyzer Architecture" />
+</p>
 
-  subgraph inputs [Data Sources]
-    API["GitHub API<br/>(octokit)"]
-    ENV["Runner Environment<br/>GITHUB_RUN_ATTEMPT<br/>GITHUB_RUN_NUMBER<br/>GITHUB_WORKFLOW"]
-    CTX["github.context<br/>eventName, actor,<br/>ref, sha, payload"]
-  end
-
-  subgraph apiCalls [API Calls — index.ts]
-    ListJobs["listJobsForWorkflowRun<br/>jobs, steps, timing"]
-    ListArtifacts["listWorkflowRunArtifacts<br/>name, size, url"]
-    DownloadLogs["downloadJobLogsForWorkflowRun<br/>raw log text"]
-  end
-
-  subgraph analysis [Analysis Engine — analyzer.ts]
-    Patterns["loadPatterns<br/>local + remote patterns.json"]
-    Analyze["analyzeLogs<br/>priority-sorted pattern matching"]
-    Timing["computeJobTiming<br/>duration, queue, slow steps"]
-    Tests["extractTestResults<br/>Jest, pytest, Go, JUnit,<br/>Mocha, RSpec, PHPUnit"]
-    Annotations["extractAnnotations<br/>error, warning, notice"]
-    Warnings["warning extraction<br/>categorized by type"]
-    BuildParams["extractBuildParams<br/>env, input, cli-flag"]
-    GitRefs["extractGitRefsFromLogs<br/>actions, docker, submodules"]
-    ClonedRepos["extractClonedRepos<br/>repo, branch, commit, depth"]
-    Links["extractLinksFromLogs<br/>artifact URLs, registry links"]
-  end
-
-  subgraph decision [Decision — index.ts]
-    Check{"Failed<br/>jobs?"}
-  end
-
-  subgraph formatSuccess [Success Path — formatter.ts]
-    SuccessSummary["formatSuccessSummary<br/>Job Summary tab"]
-    SuccessPR["formatSuccessPRComment<br/>PR comment"]
-  end
-
-  subgraph formatFailure [Failure Path — formatter.ts]
-    FailSummary["formatJobSummary<br/>Job Summary tab"]
-    FailPR["formatPRComment<br/>PR comment"]
-  end
-
-  subgraph output [Outputs]
-    JobSummary["Job Summary Tab"]
-    PRComment["PR Comment"]
-    ActionOutputs["Action Outputs<br/>root-cause, total-duration,<br/>test-summary, run-attempt, ..."]
-  end
-
-  GHA --> API
-  GHA --> ENV
-  GHA --> CTX
-  API --> ListJobs
-  API --> ListArtifacts
-  API --> DownloadLogs
-  ListJobs --> Timing
-  DownloadLogs --> Analyze
-  DownloadLogs --> Tests
-  DownloadLogs --> Annotations
-  DownloadLogs --> Warnings
-  DownloadLogs --> BuildParams
-  DownloadLogs --> GitRefs
-  DownloadLogs --> ClonedRepos
-  DownloadLogs --> Links
-  Patterns --> Analyze
-  ListJobs --> Check
-  Check -->|"No"| SuccessSummary
-  Check -->|"No"| SuccessPR
-  Check -->|"Yes"| FailSummary
-  Check -->|"Yes"| FailPR
-  SuccessSummary --> JobSummary
-  SuccessPR --> PRComment
-  FailSummary --> JobSummary
-  FailPR --> PRComment
-  Check --> ActionOutputs
-```
-
-### Data Flow
-
-1. **Input**: The action reads its configuration (`github-token`, `post-comment`, `post-summary`) and gathers context from the GitHub API, runner environment variables, and `github.context`.
-
-2. **API Calls**: Three GitHub API endpoints provide the raw data — job metadata with step-level timing, workflow artifacts, and raw log text for each job.
-
-3. **Analysis**: The log text is processed through multiple extraction engines in parallel:
-   - **Pattern matching** (`analyzer.ts`) — matches log lines against priority-sorted patterns from `patterns.json` (local + optional remote) to identify root causes
-   - **Timing** — computes job/step durations from API timestamps; flags slow steps (>5 min or >60% of job)
-   - **Test results** — parses output from 8 test frameworks (Jest, Vitest, pytest, Go, JUnit, Mocha, RSpec, PHPUnit)
-   - **Annotations** — captures `##[error]`, `##[warning]`, `##[notice]` before line cleaning strips them
-   - **Build context** — extracts warnings, build parameters, Git refs, cloned repos, and artifact URLs
-
-4. **Decision**: If any jobs failed, the failure path runs (root cause analysis + suggested fix). If all jobs passed, the success path runs (build documentation + timing).
-
-5. **Output**: Results are formatted as markdown and posted to the Job Summary tab and/or as a PR comment. All extracted data is also available as action outputs for downstream steps (Slack notifications, custom dashboards, etc.).
+| Stage | What Happens |
+|:------|:-------------|
+| **Trigger** | A GitHub Actions workflow run completes. The action reads the GitHub API via octokit, runner environment variables (`GITHUB_RUN_ATTEMPT`, `GITHUB_RUN_NUMBER`, `GITHUB_WORKFLOW`), and `github.context` (event name, actor, ref, sha). |
+| **Data Collection** | Three API calls gather the raw data: job metadata with step-level timing, workflow artifacts (name, size, URL), and raw log text for each job. |
+| **Analysis Engine** | The log text passes through 10 extraction engines in `analyzer.ts`: priority-sorted pattern matching against `patterns.json`, timing intelligence, test result parsing (8 frameworks), annotation collection, warning extraction, build parameter detection, Git ref/Docker image tracking, cloned repo identification, link extraction, and error categorization. |
+| **Formatting** | If any jobs failed, the failure path generates a root cause report with suggested fix, error context, and health scorecard. If all passed, the success path generates a build documentation report with durations and status. Both paths include all extracted context (tests, timing, warnings, params, refs, links). |
+| **Output** | Results are posted as a markdown report to the Job Summary tab and/or as a PR comment. 14 structured action outputs are also set for downstream integrations (Slack, dashboards, etc.). |
 
 ---
 
