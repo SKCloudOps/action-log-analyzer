@@ -238,7 +238,10 @@ function buildArtifactsAndLinksSection(
 
   if (extractedLinks.length > 0) {
     for (const { url, label } of extractedLinks) {
-      const display = label || 'Extracted link'
+      let display = label || ''
+      if (!display) {
+        try { display = new URL(url).hostname.replace(/^www\./, '') } catch { display = 'Link' }
+      }
       const shortUrl = url.length > 55 ? url.slice(0, 52) + '…' : url
       parts.push(`| [${display}](${url}) | ${shortUrl} |`)
     }
@@ -573,7 +576,11 @@ export function formatSuccessPRComment(
       }
       const other = extractedLinks.filter(l => !l.label || l.label !== 'Coverage report')
       if (other.length > 0) {
-        parts.push(`**Links:** ${other.slice(0, 5).map(l => `[${l.label || 'link'}](${l.url})`).join(', ')}`)
+        parts.push(`**Links:** ${other.slice(0, 5).map(l => {
+          let display = l.label || ''
+          if (!display) { try { display = new URL(l.url).hostname.replace(/^www\./, '') } catch { display = 'Link' } }
+          return `[${display}](${l.url})`
+        }).join(', ')}`)
       }
     }
     extra = `\n\n${parts.join('\n\n')}\n\n[View workflow run & download](${runUrl})`

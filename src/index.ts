@@ -42,20 +42,30 @@ function categorizeWarnings(warningLines: string[]): Record<string, string[]> {
   return byCategory
 }
 
-function extractLinksFromLogs(logs: string): { url: string; label?: string }[] {
+function extractDomain(url: string): string {
+  try {
+    const host = new URL(url).hostname.replace(/^www\./, '')
+    return host
+  } catch {
+    return url.length > 30 ? url.slice(0, 27) + '...' : url
+  }
+}
+
+function extractLinksFromLogs(logs: string): { url: string; label: string }[] {
   const urlRegex = /https?:\/\/[^\s\)\]\>"\']+/g
   const found = new Set<string>()
-  const links: { url: string; label?: string }[] = []
+  const links: { url: string; label: string }[] = []
   for (const match of logs.matchAll(urlRegex)) {
     let url = match[0].replace(/[.,;:!?]+$/, '')
     if (url.length > 10 && url.length < 500 && !found.has(url) && !url.includes('github.com')) {
       found.add(url)
       const label = url.includes('coverage') ? 'Coverage report' :
-        url.includes('test') || url.includes('report') ? 'Test/report' : undefined
+        url.includes('test') || url.includes('report') ? 'Test/report' :
+        extractDomain(url)
       links.push({ url, label })
     }
   }
-  return links.slice(0, 15)  // limit to 15
+  return links.slice(0, 15)
 }
 
 async function run(): Promise<void> {
