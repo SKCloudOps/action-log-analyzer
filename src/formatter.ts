@@ -1,4 +1,4 @@
-import { FailureAnalysis, BuildParam, GitRef } from './analyzer'
+import { FailureAnalysis, BuildParam, GitRef, ClonedRepo } from './analyzer'
 
 const MAX_ERROR_LINES = 10
 
@@ -175,28 +175,35 @@ function buildBuildParamsSection(params: BuildParam[]): string {
 ${rows.join('\n')}`
 }
 
-function buildGitRefsSection(refs: GitRef[]): string {
-  if (refs.length === 0) return ''
+function buildClonedReposTable(repos: ClonedRepo[]): string {
+  if (repos.length === 0) return ''
 
-  const typeLabels: Record<string, string> = {
-    action: 'Action',
-    docker: 'Docker',
-    'git-checkout': 'Git',
-    submodule: 'Submodule'
-  }
-  const typeEmojis: Record<string, string> = {
-    action: '🔧',
-    docker: '🐳',
-    'git-checkout': '🔀',
-    submodule: '📦'
-  }
+  const rows = repos.map(r => {
+    const repoLink = r.repository.includes('/')
+      ? `[${r.repository}](https://github.com/${r.repository})`
+      : `\`${r.repository}\``
+    const commitDisplay = r.commit !== '—' ? `\`${r.commit.substring(0, 7)}\`` : '—'
+    return `| ${repoLink} | \`${r.branch}\` | ${commitDisplay} | ${r.depth} |`
+  })
 
-  const rows = refs.map(r => {
+  return `| Repository | Branch / Tag | Commit | Depth |
+|:-----------|:-------------|:-------|:------|
+${rows.join('\n')}`
+}
+
+function buildActionsAndImagesTable(refs: GitRef[]): string {
+  const filtered = refs.filter(r => r.type === 'action' || r.type === 'docker')
+  if (filtered.length === 0) return ''
+
+  const typeEmojis: Record<string, string> = { action: '🔧', docker: '🐳' }
+  const typeLabels: Record<string, string> = { action: 'Action', docker: 'Docker' }
+
+  const rows = filtered.map(r => {
     const emoji = typeEmojis[r.type] || '📌'
     const label = typeLabels[r.type] || r.type
-    const repoDisplay = r.repo
-      ? (r.type === 'action' ? `[${r.repo}](https://github.com/${r.repo})` : `\`${r.repo}\``)
-      : '—'
+    const repoDisplay = r.type === 'action'
+      ? `[${r.repo}](https://github.com/${r.repo})`
+      : `\`${r.repo}\``
     return `| ${emoji} ${label} | ${repoDisplay} | \`${r.ref}\` |`
   })
 
@@ -250,7 +257,8 @@ export function formatPRComment(
   commit: string,
   artifacts: { name: string; size_in_bytes: number }[] = [],
   extractedLinks: { url: string; label?: string }[] = [],
-  gitRefs: GitRef[] = []
+  gitRefs: GitRef[] = [],
+  clonedRepos: ClonedRepo[] = []
 ): string {
   const passedCount = steps.filter(s => s.conclusion === 'success').length
   const totalCount = steps.length
@@ -310,9 +318,12 @@ ${buildWarningsSection(analysis.warningLines, analysis.warningLinesByCategory, 1
 ` : ''}${analysis.buildParams.length > 0 ? `
 ### Build Parameters
 ${buildBuildParamsSection(analysis.buildParams)}
-` : ''}${gitRefs.length > 0 ? `
-### Repositories, Actions & Tags
-${buildGitRefsSection(gitRefs)}
+` : ''}${clonedRepos.length > 0 ? `
+### Cloned Repositories
+${buildClonedReposTable(clonedRepos)}
+` : ''}${gitRefs.filter(r => r.type === 'action' || r.type === 'docker').length > 0 ? `
+### Actions & Docker Images
+${buildActionsAndImagesTable(gitRefs)}
 ` : ''}
 ### Artifacts & Links
 ${buildArtifactsAndLinksSection(runUrl, artifacts, extractedLinks, repo)}
@@ -332,7 +343,8 @@ export function formatJobSummary(
   repo: string,
   artifacts: { name: string; size_in_bytes: number }[] = [],
   extractedLinks: { url: string; label?: string }[] = [],
-  gitRefs: GitRef[] = []
+  gitRefs: GitRef[] = [],
+  clonedRepos: ClonedRepo[] = []
 ): string {
   const label = SEVERITY_LABEL[analysis.severity]
   const emoji = SEVERITY_EMOJI[analysis.severity]
@@ -405,9 +417,14 @@ ${buildWarningsSection(analysis.warningLines, analysis.warningLinesByCategory, M
 ${buildBuildParamsSection(analysis.buildParams)}
 
 ---
-` : ''}${gitRefs.length > 0 ? `
-## Repositories, Actions & Tags
-${buildGitRefsSection(gitRefs)}
+` : ''}${clonedRepos.length > 0 ? `
+## Cloned Repositories
+${buildClonedReposTable(clonedRepos)}
+
+---
+` : ''}${gitRefs.filter(r => r.type === 'action' || r.type === 'docker').length > 0 ? `
+## Actions & Docker Images
+${buildActionsAndImagesTable(gitRefs)}
 
 ---
 ` : ''}
@@ -430,7 +447,8 @@ export function formatSuccessSummary(
   warningLines: string[] = [],
   warningLinesByCategory: Record<string, string[]> = {},
   buildParams: BuildParam[] = [],
-  gitRefs: GitRef[] = []
+  gitRefs: GitRef[] = [],
+  clonedRepos: ClonedRepo[] = []
 ): string {
   const now = new Date().toUTCString()
 
@@ -517,8 +535,11 @@ ${buildWarningsSection(warningLines, warningLinesByCategory, 10)}
 ` : ''}${buildParams.length > 0 ? `### Build Parameters
 ${buildBuildParamsSection(buildParams)}
 
-` : ''}${gitRefs.length > 0 ? `### Repositories, Actions & Tags
-${buildGitRefsSection(gitRefs)}
+` : ''}${clonedRepos.length > 0 ? `### Cloned Repositories
+${buildClonedReposTable(clonedRepos)}
+
+` : ''}${gitRefs.filter(r => r.type === 'action' || r.type === 'docker').length > 0 ? `### Actions & Docker Images
+${buildActionsAndImagesTable(gitRefs)}
 
 ` : ''}### Artifacts & Links
 ${buildArtifactsAndLinksSection(runUrl, artifacts, extractedLinks, repo)}
@@ -535,7 +556,8 @@ export function formatSuccessPRComment(
   warningLines: string[] = [],
   warningLinesByCategory: Record<string, string[]> = {},
   buildParams: BuildParam[] = [],
-  gitRefs: GitRef[] = []
+  gitRefs: GitRef[] = [],
+  clonedRepos: ClonedRepo[] = []
 ): string {
   const jobsList = jobNames.map(n => `\`${n}\``).join(', ')
   let extra = `\n\n[View workflow run](${runUrl})`
@@ -565,13 +587,17 @@ export function formatSuccessPRComment(
     ? `\n\n### Build Parameters\n${buildBuildParamsSection(buildParams)}`
     : ''
 
-  const refsSection = gitRefs.length > 0
-    ? `\n\n### Repositories, Actions & Tags\n${buildGitRefsSection(gitRefs)}`
+  const clonedSection = clonedRepos.length > 0
+    ? `\n\n### Cloned Repositories\n${buildClonedReposTable(clonedRepos)}`
+    : ''
+
+  const actionsSection = gitRefs.filter(r => r.type === 'action' || r.type === 'docker').length > 0
+    ? `\n\n### Actions & Docker Images\n${buildActionsAndImagesTable(gitRefs)}`
     : ''
 
   return `## Log Analyzer Report
 
-All jobs completed successfully: ${jobsList}${warningSection}${paramsSection}${refsSection}${extra}
+All jobs completed successfully: ${jobsList}${warningSection}${paramsSection}${clonedSection}${actionsSection}${extra}
 
 ---
 *[Action Log Analyzer](https://github.com/SKCloudOps/action-log-analyzer) · [Report issue](https://github.com/SKCloudOps/action-log-analyzer/issues)*`

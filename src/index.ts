@@ -1,6 +1,6 @@
 import * as core from '@actions/core'
 import * as github from '@actions/github'
-import { loadPatterns, analyzeLogs, extractBuildParams, extractGitRefsFromLogs, extractGitRefsFromSteps, BuildParam, GitRef } from './analyzer'
+import { loadPatterns, analyzeLogs, extractBuildParams, extractGitRefsFromLogs, extractGitRefsFromSteps, extractClonedRepos, BuildParam, GitRef, ClonedRepo } from './analyzer'
 import { formatPRComment, formatJobSummary, formatSuccessSummary, formatSuccessPRComment } from './formatter'
 
 function cleanLogLine(raw: string): string {
@@ -114,6 +114,7 @@ async function run(): Promise<void> {
       let allWarnings: string[] = []
       let allBuildParams: BuildParam[] = []
       let allGitRefs: GitRef[] = []
+      let allClonedRepos: ClonedRepo[] = []
       const successfulJobs = jobsData.jobs.filter(j => j.conclusion === 'success')
       for (const job of successfulJobs.slice(0, 3)) {
         try {
@@ -127,6 +128,7 @@ async function run(): Promise<void> {
           allBuildParams = [...allBuildParams, ...extractBuildParams(logLines)]
           allGitRefs = [...allGitRefs, ...extractGitRefsFromLogs(logLines)]
           allGitRefs = [...allGitRefs, ...extractGitRefsFromSteps(job.steps ?? [], logs)]
+          allClonedRepos = [...allClonedRepos, ...extractClonedRepos(logLines)]
           const seen = new Set<string>()
           extractedLinks = extractedLinks.filter(l => {
             if (seen.has(l.url)) return false
@@ -154,6 +156,12 @@ async function run(): Promise<void> {
         seenRefs.add(uid)
         return true
       }).slice(0, 40)
+      const seenCloned = new Set<string>()
+      allClonedRepos = allClonedRepos.filter(r => {
+        if (seenCloned.has(r.repository)) return false
+        seenCloned.add(r.repository)
+        return true
+      }).slice(0, 20)
 
       const warningLinesByCategory = categorizeWarnings(allWarnings)
 
@@ -164,7 +172,10 @@ async function run(): Promise<void> {
         core.info(`Detected ${allBuildParams.length} build parameter(s)`)
       }
       if (allGitRefs.length > 0) {
-        core.info(`Detected ${allGitRefs.length} repository/action reference(s)`)
+        core.info(`Detected ${allGitRefs.length} action/docker reference(s)`)
+      }
+      if (allClonedRepos.length > 0) {
+        core.info(`Detected ${allClonedRepos.length} cloned repository(ies)`)
       }
 
       if (postSummary) {
@@ -180,7 +191,8 @@ async function run(): Promise<void> {
           allWarnings,
           warningLinesByCategory,
           allBuildParams,
-          allGitRefs
+          allGitRefs,
+          allClonedRepos
         )
         await core.summary.addRaw(successSummary).write()
         core.info('Success summary posted.')
@@ -189,7 +201,7 @@ async function run(): Promise<void> {
       if (postComment && context.payload.pull_request) {
         const prNumber = context.payload.pull_request.number
         const jobNames = completedJobs.map(j => j.name)
-        const comment = formatSuccessPRComment(jobNames, runUrl, artifacts, extractedLinks, allWarnings, warningLinesByCategory, allBuildParams, allGitRefs)
+        const comment = formatSuccessPRComment(jobNames, runUrl, artifacts, extractedLinks, allWarnings, warningLinesByCategory, allBuildParams, allGitRefs, allClonedRepos)
 
         const { data: comments } = await octokit.rest.issues.listComments({
           owner, repo, issue_number: prNumber
@@ -262,12 +274,16 @@ async function run(): Promise<void> {
         seenJobRefs.add(uid)
         return true
       }).slice(0, 40)
+      const jobClonedRepos = extractClonedRepos(logLines)
 
       core.info(`Root cause: ${analysis.rootCause}`)
       core.info(`Category: ${analysis.category}`)
       core.info(`Matched pattern: ${analysis.matchedPattern}`)
       if (jobGitRefs.length > 0) {
-        core.info(`Detected ${jobGitRefs.length} repository/action reference(s)`)
+        core.info(`Detected ${jobGitRefs.length} action/docker reference(s)`)
+      }
+      if (jobClonedRepos.length > 0) {
+        core.info(`Detected ${jobClonedRepos.length} cloned repository(ies)`)
       }
 
       core.setOutput('root-cause', analysis.rootCause)
@@ -283,7 +299,7 @@ async function run(): Promise<void> {
         const summary = formatJobSummary(
           analysis, job.name, runUrl,
           job.steps ?? [], triggeredBy, branch, commit, repoFullName,
-          artifacts, extractedLinks, jobGitRefs
+          artifacts, extractedLinks, jobGitRefs, jobClonedRepos
         )
         await core.summary.addRaw(summary).write()
         core.info('Job summary posted.')
@@ -295,7 +311,7 @@ async function run(): Promise<void> {
         const comment = formatPRComment(
           analysis, job.name, runUrl,
           job.steps ?? [], repoFullName, branch, commit,
-          artifacts, extractedLinks, jobGitRefs
+          artifacts, extractedLinks, jobGitRefs, jobClonedRepos
         )
 
         const { data: comments } = await octokit.rest.issues.listComments({

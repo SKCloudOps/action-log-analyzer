@@ -34,6 +34,13 @@ export interface GitRef {
   type: 'action' | 'docker' | 'git-checkout' | 'submodule'
 }
 
+export interface ClonedRepo {
+  repository: string
+  branch: string
+  commit: string
+  depth: string
+}
+
 interface ErrorPattern {
   id: string
   category: string
@@ -279,6 +286,92 @@ export function extractGitRefsFromLogs(lines: string[]): GitRef[] {
   }
 
   return refs.slice(0, 40)
+}
+
+export function extractClonedRepos(lines: string[]): ClonedRepo[] {
+  const repos: ClonedRepo[] = []
+  const seen = new Set<string>()
+
+  let currentRepo = ''
+  let currentBranch = ''
+  let currentCommit = ''
+  let currentDepth = ''
+
+  for (const raw of lines) {
+    const line = cleanLine(raw)
+    if (!line) continue
+
+    // "Syncing repository: owner/repo"
+    const syncMatch = line.match(/Syncing repository:\s+(\S+)/)
+    if (syncMatch) {
+      if (currentRepo && !seen.has(currentRepo)) {
+        seen.add(currentRepo)
+        repos.push({ repository: currentRepo, branch: currentBranch || '—', commit: currentCommit || '—', depth: currentDepth || 'full' })
+      }
+      currentRepo = syncMatch[1]
+      currentBranch = ''
+      currentCommit = ''
+      currentDepth = ''
+    }
+
+    // "Setting up auth for https://github.com/owner/repo"
+    const authMatch = line.match(/Setting up auth.*github\.com\/([^\s'"]+)/)
+    if (authMatch && !currentRepo) {
+      currentRepo = authMatch[1].replace(/\.git$/, '')
+    }
+
+    // "Checking out ref: refs/heads/main" or "refs/tags/v1.0" or "refs/pull/123/merge"
+    const refMatch = line.match(/[Cc]hecking out (?:ref:\s*)?refs\/(heads|tags|pull)\/(\S+)/)
+    if (refMatch) {
+      const refType = refMatch[1]
+      const refName = refMatch[2]
+      if (refType === 'heads') currentBranch = refName
+      else if (refType === 'tags') currentBranch = `tag: ${refName}`
+      else if (refType === 'pull') currentBranch = `PR #${refName.replace('/merge', '')}`
+    }
+
+    // "HEAD is now at abc1234 Commit message"
+    const headMatch = line.match(/HEAD is now at\s+([a-f0-9]{7,40})/)
+    if (headMatch) {
+      currentCommit = headMatch[1]
+    }
+
+    // "Fetching the repository" with --depth
+    const depthMatch = line.match(/--depth[= ](\d+)/)
+    if (depthMatch) {
+      currentDepth = depthMatch[1]
+    }
+
+    // "fetch-depth: N" from logged step inputs
+    const fetchDepthInput = line.match(/fetch-depth:\s*(\d+)/)
+    if (fetchDepthInput) {
+      currentDepth = fetchDepthInput[1] === '0' ? 'full' : fetchDepthInput[1]
+    }
+
+    // "git clone https://github.com/owner/repo ..."
+    const cloneMatch = line.match(/git\s+clone\s+(?:--[^\s]+\s+)*(?:https?:\/\/github\.com\/)?([^\s'"]+)/i)
+    if (cloneMatch && !syncMatch) {
+      const clonedRepo = cloneMatch[1].replace(/\.git$/, '')
+      if (clonedRepo.includes('/') && !seen.has(clonedRepo)) {
+        seen.add(clonedRepo)
+        repos.push({ repository: clonedRepo, branch: '—', commit: '—', depth: 'full' })
+      }
+    }
+
+    // "git fetch origin branch-name"
+    const fetchBranch = line.match(/git\s+fetch\s+\S+\s+(\S+)/i)
+    if (fetchBranch && currentRepo) {
+      const fetched = fetchBranch[1].replace(/^refs\/heads\//, '')
+      if (!currentBranch && !fetched.startsWith('-')) currentBranch = fetched
+    }
+  }
+
+  if (currentRepo && !seen.has(currentRepo)) {
+    seen.add(currentRepo)
+    repos.push({ repository: currentRepo, branch: currentBranch || '—', commit: currentCommit || '—', depth: currentDepth || 'full' })
+  }
+
+  return repos.slice(0, 20)
 }
 
 export function extractGitRefsFromSteps(
