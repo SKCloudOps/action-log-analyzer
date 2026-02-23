@@ -158,9 +158,6 @@ function buildArtifactsAndLinksSection(
     }
   }
 
-  parts.push(`| [Add custom pattern](https://github.com/${repo}/blob/main/patterns.json) | patterns.json |`)
-  parts.push(`| [Report issue](https://github.com/SKCloudOps/action-log-analyzer/issues) | Action Log Analyzer |`)
-
   return parts.join('\n')
 }
 

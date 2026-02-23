@@ -9,11 +9,10 @@ function extractLinksFromLogs(logs: string): { url: string; label?: string }[] {
   const links: { url: string; label?: string }[] = []
   for (const match of logs.matchAll(urlRegex)) {
     let url = match[0].replace(/[.,;:!?]+$/, '')
-    if (url.length > 10 && url.length < 500 && !found.has(url)) {
+    if (url.length > 10 && url.length < 500 && !found.has(url) && !url.includes('github.com')) {
       found.add(url)
       const label = url.includes('coverage') ? 'Coverage report' :
-        url.includes('test') || url.includes('report') ? 'Test/report' :
-        url.includes('github.com') ? 'GitHub' : undefined
+        url.includes('test') || url.includes('report') ? 'Test/report' : undefined
       links.push({ url, label })
     }
   }
