@@ -106,6 +106,77 @@ const SEVERITY_EMOJI = {
     warning: '🟡',
     info: '🔵'
 };
+function buildWarningsSection(warningLines, warningLinesByCategory, maxLines) {
+    if (warningLines.length === 0)
+        return '';
+    const categories = Object.keys(warningLinesByCategory).sort();
+    const parts = [];
+    let linesShown = 0;
+    const truncated = warningLines.length > maxLines;
+    for (const cat of categories) {
+        const lines = warningLinesByCategory[cat];
+        const remaining = maxLines - linesShown;
+        const showLines = truncated ? lines.slice(0, Math.min(lines.length, Math.max(0, remaining))) : lines;
+        const hidden = lines.length - showLines.length;
+        const content = showLines.map(line => `   ${line}`).join('\n');
+        const suffix = hidden > 0 ? `\n   ... ${hidden} more` : '';
+        const header = hidden > 0 ? `${cat} (${showLines.length}/${lines.length})` : `${cat} (${lines.length})`;
+        parts.push(`<details>
+<summary>${header}</summary>
+
+\`\`\`text
+${content}${suffix}
+\`\`\`
+</details>`);
+        linesShown += showLines.length;
+        if (linesShown >= maxLines && truncated)
+            break;
+    }
+    return parts.join('\n\n');
+}
+function buildBuildParamsSection(params) {
+    if (params.length === 0)
+        return '';
+    const rows = params.map(p => {
+        const displayValue = p.value.length > 60 ? p.value.slice(0, 57) + '...' : p.value;
+        return `| \`${p.key}\` | \`${displayValue}\` | ${p.source} |`;
+    });
+    return `| Parameter | Value | Source |
+|:----------|:------|:-------|
+${rows.join('\n')}`;
+}
+function buildClonedReposTable(repos) {
+    if (repos.length === 0)
+        return '';
+    const rows = repos.map(r => {
+        const repoLink = r.repository.includes('/')
+            ? `[${r.repository}](https://github.com/${r.repository})`
+            : `\`${r.repository}\``;
+        const commitDisplay = r.commit !== '—' ? `\`${r.commit.substring(0, 7)}\`` : '—';
+        return `| ${repoLink} | \`${r.branch}\` | ${commitDisplay} | ${r.depth} |`;
+    });
+    return `| Repository | Branch / Tag | Commit | Depth |
+|:-----------|:-------------|:-------|:------|
+${rows.join('\n')}`;
+}
+function buildActionsAndImagesTable(refs) {
+    const filtered = refs.filter(r => r.type === 'action' || r.type === 'docker');
+    if (filtered.length === 0)
+        return '';
+    const typeEmojis = { action: '🔧', docker: '🐳' };
+    const typeLabels = { action: 'Action', docker: 'Docker' };
+    const rows = filtered.map(r => {
+        const emoji = typeEmojis[r.type] || '📌';
+        const label = typeLabels[r.type] || r.type;
+        const repoDisplay = r.type === 'action'
+            ? `[${r.repo}](https://github.com/${r.repo})`
+            : `\`${r.repo}\``;
+        return `| ${emoji} ${label} | ${repoDisplay} | \`${r.ref}\` |`;
+    });
+    return `| Type | Repository / Image | Ref / Tag |
+|:-----|:-------------------|:----------|
+${rows.join('\n')}`;
+}
 function formatBytes(bytes) {
     if (bytes < 1024)
         return `${bytes} B`;
@@ -125,14 +196,22 @@ function buildArtifactsAndLinksSection(runUrl, artifacts, extractedLinks, repo) 
     }
     if (extractedLinks.length > 0) {
         for (const { url, label } of extractedLinks) {
-            const display = label || 'Extracted link';
+            let display = label || '';
+            if (!display) {
+                try {
+                    display = new URL(url).hostname.replace(/^www\./, '');
+                }
+                catch {
+                    display = 'Link';
+                }
+            }
             const shortUrl = url.length > 55 ? url.slice(0, 52) + '…' : url;
             parts.push(`| [${display}](${url}) | ${shortUrl} |`);
         }
     }
     return parts.join('\n');
 }
-function formatPRComment(analysis, jobName, runUrl, steps, repo, branch, commit, artifacts = [], extractedLinks = []) {
+function formatPRComment(analysis, jobName, runUrl, steps, repo, branch, commit, artifacts = [], extractedLinks = [], gitRefs = [], clonedRepos = []) {
     const passedCount = steps.filter(s => s.conclusion === 'success').length;
     const totalCount = steps.length;
     const stepBar = steps.map(s => s.conclusion === 'success' ? '🟢' :
@@ -179,14 +258,26 @@ ${exactMatchLine}
 ### Suggested Fix
 ${analysis.suggestion}${docsLink}
 ${errorBlock}
-
+${analysis.warningLines.length > 0 ? `
+### Warnings (${analysis.warningLines.length})
+${buildWarningsSection(analysis.warningLines, analysis.warningLinesByCategory, 10)}
+` : ''}${analysis.buildParams.length > 0 ? `
+### Build Parameters
+${buildBuildParamsSection(analysis.buildParams)}
+` : ''}${clonedRepos.length > 0 ? `
+### Cloned Repositories
+${buildClonedReposTable(clonedRepos)}
+` : ''}${gitRefs.filter(r => r.type === 'action' || r.type === 'docker').length > 0 ? `
+### Actions & Docker Images
+${buildActionsAndImagesTable(gitRefs)}
+` : ''}
 ### Artifacts & Links
 ${buildArtifactsAndLinksSection(runUrl, artifacts, extractedLinks, repo)}
 
 ---
 *[Action Log Analyzer](https://github.com/SKCloudOps/action-log-analyzer)*`;
 }
-function formatJobSummary(analysis, jobName, runUrl, steps, triggeredBy, branch, commit, repo, artifacts = [], extractedLinks = []) {
+function formatJobSummary(analysis, jobName, runUrl, steps, triggeredBy, branch, commit, repo, artifacts = [], extractedLinks = [], gitRefs = [], clonedRepos = []) {
     const label = SEVERITY_LABEL[analysis.severity];
     const emoji = SEVERITY_EMOJI[analysis.severity];
     const now = new Date().toUTCString();
@@ -241,14 +332,34 @@ ${analysis.suggestion}${docsLink}
 ${buildGroupedErrorBlockSummary(analysis.errorLinesByCategory || {}, analysis.exactMatchLine, MAX_ERROR_LINES, runUrl, analysis.errorLines.length)}
 
 ---
+${analysis.warningLines.length > 0 ? `
+## Warnings (${analysis.warningLines.length})
+${buildWarningsSection(analysis.warningLines, analysis.warningLinesByCategory, MAX_ERROR_LINES)}
 
+---
+` : ''}${analysis.buildParams.length > 0 ? `
+## Build Parameters
+${buildBuildParamsSection(analysis.buildParams)}
+
+---
+` : ''}${clonedRepos.length > 0 ? `
+## Cloned Repositories
+${buildClonedReposTable(clonedRepos)}
+
+---
+` : ''}${gitRefs.filter(r => r.type === 'action' || r.type === 'docker').length > 0 ? `
+## Actions & Docker Images
+${buildActionsAndImagesTable(gitRefs)}
+
+---
+` : ''}
 ## Artifacts & Links
 ${buildArtifactsAndLinksSection(runUrl, artifacts, extractedLinks, repo)}
 
 ---
 *Action Log Analyzer · ${now}*`;
 }
-function formatSuccessSummary(runUrl, jobs, triggeredBy, branch, commit, repo, artifacts = [], extractedLinks = []) {
+function formatSuccessSummary(runUrl, jobs, triggeredBy, branch, commit, repo, artifacts = [], extractedLinks = [], warningLines = [], warningLinesByCategory = {}, buildParams = [], gitRefs = [], clonedRepos = []) {
     const now = new Date().toUTCString();
     const jobRows = jobs.map(job => {
         const icon = job.conclusion === 'success' ? '✅' : job.conclusion === 'failure' ? '❌' : '⏳';
@@ -280,24 +391,6 @@ function formatSuccessSummary(runUrl, jobs, triggeredBy, branch, commit, repo, a
 |:--|:-----|:----|:------:|:---------|
 ${stepRows}`;
     }
-    const coverageLinks = extractedLinks.filter(l => l.label === 'Coverage report');
-    const reportLinks = extractedLinks.filter(l => l.label && l.label !== 'Coverage report');
-    let coverageSection = '';
-    if (coverageLinks.length > 0 || reportLinks.length > 0) {
-        const parts = [];
-        if (coverageLinks.length > 0) {
-            parts.push(`| Coverage | ${coverageLinks.map(l => `[${l.label}](${l.url})`).join(' · ')} |`);
-        }
-        if (reportLinks.length > 0) {
-            parts.push(`| Reports | ${reportLinks.slice(0, 5).map(l => `[${l.label}](${l.url})`).join(' · ')} |`);
-        }
-        coverageSection = `
-
-### Coverage & Reports
-| Type | Link |
-|:-----|:-----|
-${parts.join('\n')}`;
-    }
     return `# Log Analyzer Report
 
 ## All Jobs Passed
@@ -319,15 +412,26 @@ ${jobRows}
 | Jobs passed | ${jobs.length} |
 | Steps completed | ${passedSteps}/${totalSteps} |
 ${timelineSection}
-${coverageSection}
 
-### Artifacts & Links
+${warningLines.length > 0 ? `### Warnings (${warningLines.length})
+${buildWarningsSection(warningLines, warningLinesByCategory, 10)}
+
+` : ''}${buildParams.length > 0 ? `### Build Parameters
+${buildBuildParamsSection(buildParams)}
+
+` : ''}${clonedRepos.length > 0 ? `### Cloned Repositories
+${buildClonedReposTable(clonedRepos)}
+
+` : ''}${gitRefs.filter(r => r.type === 'action' || r.type === 'docker').length > 0 ? `### Actions & Docker Images
+${buildActionsAndImagesTable(gitRefs)}
+
+` : ''}### Artifacts & Links
 ${buildArtifactsAndLinksSection(runUrl, artifacts, extractedLinks, repo)}
 
 ---
 *Action Log Analyzer · ${now}*`;
 }
-function formatSuccessPRComment(jobNames, runUrl, artifacts = [], extractedLinks = []) {
+function formatSuccessPRComment(jobNames, runUrl, artifacts = [], extractedLinks = [], warningLines = [], warningLinesByCategory = {}, buildParams = [], gitRefs = [], clonedRepos = []) {
     const jobsList = jobNames.map(n => `\`${n}\``).join(', ');
     let extra = `\n\n[View workflow run](${runUrl})`;
     if (artifacts.length > 0 || extractedLinks.length > 0) {
@@ -336,20 +440,36 @@ function formatSuccessPRComment(jobNames, runUrl, artifacts = [], extractedLinks
             parts.push(`**Artifacts:** ${artifacts.map(a => `\`${a.name}\` (${Math.round(a.size_in_bytes / 1024)} KB)`).join(', ')}`);
         }
         if (extractedLinks.length > 0) {
-            const coverage = extractedLinks.filter(l => l.label === 'Coverage report');
-            if (coverage.length > 0) {
-                parts.push(`**Coverage:** ${coverage.map(l => `[${l.label}](${l.url})`).join(', ')}`);
-            }
-            const other = extractedLinks.filter(l => !l.label || l.label !== 'Coverage report');
-            if (other.length > 0) {
-                parts.push(`**Links:** ${other.slice(0, 5).map(l => `[${l.label || 'link'}](${l.url})`).join(', ')}`);
-            }
+            parts.push(`**Links:** ${extractedLinks.slice(0, 5).map(l => {
+                let display = l.label || '';
+                if (!display) {
+                    try {
+                        display = new URL(l.url).hostname.replace(/^www\./, '');
+                    }
+                    catch {
+                        display = 'Link';
+                    }
+                }
+                return `[${display}](${l.url})`;
+            }).join(', ')}`);
         }
         extra = `\n\n${parts.join('\n\n')}\n\n[View workflow run & download](${runUrl})`;
     }
+    const warningSection = warningLines.length > 0
+        ? `\n\n### Warnings (${warningLines.length})\n${buildWarningsSection(warningLines, warningLinesByCategory, 10)}`
+        : '';
+    const paramsSection = buildParams.length > 0
+        ? `\n\n### Build Parameters\n${buildBuildParamsSection(buildParams)}`
+        : '';
+    const clonedSection = clonedRepos.length > 0
+        ? `\n\n### Cloned Repositories\n${buildClonedReposTable(clonedRepos)}`
+        : '';
+    const actionsSection = gitRefs.filter(r => r.type === 'action' || r.type === 'docker').length > 0
+        ? `\n\n### Actions & Docker Images\n${buildActionsAndImagesTable(gitRefs)}`
+        : '';
     return `## Log Analyzer Report
 
-All jobs completed successfully: ${jobsList}${extra}
+All jobs completed successfully: ${jobsList}${warningSection}${paramsSection}${clonedSection}${actionsSection}${extra}
 
 ---
 *[Action Log Analyzer](https://github.com/SKCloudOps/action-log-analyzer) · [Report issue](https://github.com/SKCloudOps/action-log-analyzer/issues)*`;

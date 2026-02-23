@@ -29962,6 +29962,10 @@ var __importStar = (this && this.__importStar) || (function () {
 })();
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.loadPatterns = loadPatterns;
+exports.extractBuildParams = extractBuildParams;
+exports.extractGitRefsFromLogs = extractGitRefsFromLogs;
+exports.extractClonedRepos = extractClonedRepos;
+exports.extractGitRefsFromSteps = extractGitRefsFromSteps;
 exports.analyzeLogs = analyzeLogs;
 const fs = __importStar(__nccwpck_require__(9896));
 const path = __importStar(__nccwpck_require__(6928));
@@ -30053,6 +30057,257 @@ function categorizeErrorLines(errorLines, patterns) {
     }
     return byCategory;
 }
+function categorizeWarningLines(warningLines, patterns) {
+    const byCategory = {};
+    for (const line of warningLines) {
+        let assigned = false;
+        for (const p of patterns) {
+            try {
+                const regex = new RegExp(p.pattern, p.flags);
+                if (regex.test(line)) {
+                    const cat = p.category;
+                    if (!byCategory[cat])
+                        byCategory[cat] = [];
+                    byCategory[cat].push(line);
+                    assigned = true;
+                    break;
+                }
+            }
+            catch {
+                /* skip invalid regex */
+            }
+        }
+        if (!assigned) {
+            const cat = 'General';
+            if (!byCategory[cat])
+                byCategory[cat] = [];
+            byCategory[cat].push(line);
+        }
+    }
+    return byCategory;
+}
+function extractBuildParams(lines) {
+    const params = [];
+    const seen = new Set();
+    const matchers = [
+        // env var assignments: KEY=value, export KEY=value
+        { regex: /^(?:export\s+)?([A-Z][A-Z0-9_]{2,})=(.+)$/, source: 'env', keyIdx: 1, valIdx: 2 },
+        // GitHub Actions inputs: Input 'name' has been set to 'value'
+        { regex: /Input '([^']+)' has been set to '([^']*)'$/, source: 'input', keyIdx: 1, valIdx: 2 },
+        // Docker --build-arg
+        { regex: /--build-arg\s+([A-Za-z_][A-Za-z0-9_]*)=(\S+)/, source: 'cli-flag', keyIdx: 1, valIdx: 2 },
+        // Maven / Gradle -D property
+        { regex: /-D([A-Za-z_][A-Za-z0-9_.]+)=(\S+)/, source: 'cli-flag', keyIdx: 1, valIdx: 2 },
+        // Node / npm config: npm_config_KEY=value or NODE_ENV=value
+        { regex: /^(npm_config_[A-Za-z_]+|NODE_ENV|NODE_OPTIONS)=(.+)$/, source: 'env', keyIdx: 1, valIdx: 2 },
+        // GitHub env: ::set-env name=KEY::value  (deprecated but still seen)
+        { regex: /::set-env name=([^:]+)::(.*)$/, source: 'env', keyIdx: 1, valIdx: 2 },
+        // GHA set-output: ::set-output name=KEY::value (legacy)
+        { regex: /::set-output name=([^:]+)::(.*)$/, source: 'output', keyIdx: 1, valIdx: 2 },
+        // with: key: value (GHA step inputs logged as "  with: key: val")
+        { regex: /^\s+with:\s+([A-Za-z_-]+):\s+(.+)$/, source: 'input', keyIdx: 1, valIdx: 2 },
+        // env: KEY: value (GHA step env logged as "  env: KEY: val")
+        { regex: /^\s+env:\s+([A-Z][A-Z0-9_]+):\s+(.+)$/, source: 'env', keyIdx: 1, valIdx: 2 },
+    ];
+    for (const raw of lines) {
+        const line = cleanLine(raw);
+        if (!line)
+            continue;
+        for (const { regex, source, keyIdx, valIdx } of matchers) {
+            const m = line.match(regex);
+            if (m) {
+                const key = m[keyIdx];
+                const value = m[valIdx];
+                const uid = `${key}=${value}`;
+                if (!seen.has(uid) && !looksLikeSecret(key, value)) {
+                    seen.add(uid);
+                    params.push({ key, value, source });
+                }
+                break;
+            }
+        }
+    }
+    return params.slice(0, 30);
+}
+function looksLikeSecret(key, value) {
+    const secretKeywords = /token|secret|password|passwd|api_key|apikey|auth|credential|private/i;
+    if (secretKeywords.test(key))
+        return true;
+    if (value === '***' || value.includes('***'))
+        return true;
+    return false;
+}
+function extractGitRefsFromLogs(lines) {
+    const refs = [];
+    const seen = new Set();
+    for (const raw of lines) {
+        const line = cleanLine(raw);
+        if (!line)
+            continue;
+        // GHA "uses" references: "Download action repository 'actions/checkout@v4'"
+        const usesDownload = line.match(/Download action repository '([^']+@[^']+)'/);
+        if (usesDownload) {
+            const [repo, ref] = usesDownload[1].split('@');
+            const uid = `action:${repo}@${ref}`;
+            if (!seen.has(uid)) {
+                seen.add(uid);
+                refs.push({ repo, ref, type: 'action' });
+            }
+        }
+        // Docker image pulls: "Pulling from library/node" or "docker pull org/image:tag"
+        const dockerPull = line.match(/(?:docker\s+pull|Pulling\s+from)\s+([a-z0-9_./-]+(?::[a-z0-9_.-]+)?)/i);
+        if (dockerPull) {
+            const full = dockerPull[1];
+            const [repo, ref] = full.includes(':') ? full.split(':') : [full, 'latest'];
+            const uid = `docker:${repo}:${ref}`;
+            if (!seen.has(uid)) {
+                seen.add(uid);
+                refs.push({ repo, ref, type: 'docker' });
+            }
+        }
+        // Docker image used in FROM: "FROM node:20-alpine AS builder"
+        const dockerFrom = line.match(/^FROM\s+([a-z0-9_./-]+(?::[a-z0-9_.-]+)?)/i);
+        if (dockerFrom) {
+            const full = dockerFrom[1];
+            const [repo, ref] = full.includes(':') ? full.split(':') : [full, 'latest'];
+            const uid = `docker:${repo}:${ref}`;
+            if (!seen.has(uid)) {
+                seen.add(uid);
+                refs.push({ repo, ref, type: 'docker' });
+            }
+        }
+        // Git clone / checkout: "Cloning into 'repo'..." or "git checkout branch"
+        const gitClone = line.match(/Cloning into '([^']+)'/i);
+        if (gitClone) {
+            const repo = gitClone[1];
+            const uid = `git:${repo}`;
+            if (!seen.has(uid)) {
+                seen.add(uid);
+                refs.push({ repo, ref: 'HEAD', type: 'git-checkout' });
+            }
+        }
+        // "Checking out ref: refs/heads/branch" or "refs/tags/v1.0"
+        const refCheckout = line.match(/(?:Checking out|checkout)\s+(?:ref:\s+)?refs\/(heads|tags)\/(\S+)/i);
+        if (refCheckout) {
+            const refType = refCheckout[1];
+            const refName = refCheckout[2];
+            const uid = `ref:${refType}/${refName}`;
+            if (!seen.has(uid)) {
+                seen.add(uid);
+                refs.push({ repo: '', ref: `${refType}/${refName}`, type: 'git-checkout' });
+            }
+        }
+        // Submodule init: "Submodule 'path' registered for path 'path'" or "Submodule 'lib/foo' (https://github.com/org/repo)"
+        const submodule = line.match(/[Ss]ubmodule\s+'([^']+)'\s+\(([^)]+)\)/);
+        if (submodule) {
+            const repo = submodule[2].replace(/\.git$/, '').replace(/^https?:\/\/github\.com\//, '');
+            const uid = `submodule:${repo}`;
+            if (!seen.has(uid)) {
+                seen.add(uid);
+                refs.push({ repo, ref: submodule[1], type: 'submodule' });
+            }
+        }
+    }
+    return refs.slice(0, 40);
+}
+function extractClonedRepos(lines) {
+    const repos = [];
+    const seen = new Set();
+    let currentRepo = '';
+    let currentBranch = '';
+    let currentCommit = '';
+    let currentDepth = '';
+    for (const raw of lines) {
+        const line = cleanLine(raw);
+        if (!line)
+            continue;
+        // "Syncing repository: owner/repo"
+        const syncMatch = line.match(/Syncing repository:\s+(\S+)/);
+        if (syncMatch) {
+            if (currentRepo && !seen.has(currentRepo)) {
+                seen.add(currentRepo);
+                repos.push({ repository: currentRepo, branch: currentBranch || '—', commit: currentCommit || '—', depth: currentDepth || 'full' });
+            }
+            currentRepo = syncMatch[1];
+            currentBranch = '';
+            currentCommit = '';
+            currentDepth = '';
+        }
+        // "Setting up auth for https://github.com/owner/repo"
+        const authMatch = line.match(/Setting up auth.*github\.com\/([^\s'"]+)/);
+        if (authMatch && !currentRepo) {
+            currentRepo = authMatch[1].replace(/\.git$/, '');
+        }
+        // "Checking out ref: refs/heads/main" or "refs/tags/v1.0" or "refs/pull/123/merge"
+        const refMatch = line.match(/[Cc]hecking out (?:ref:\s*)?refs\/(heads|tags|pull)\/(\S+)/);
+        if (refMatch) {
+            const refType = refMatch[1];
+            const refName = refMatch[2];
+            if (refType === 'heads')
+                currentBranch = refName;
+            else if (refType === 'tags')
+                currentBranch = `tag: ${refName}`;
+            else if (refType === 'pull')
+                currentBranch = `PR #${refName.replace('/merge', '')}`;
+        }
+        // "HEAD is now at abc1234 Commit message"
+        const headMatch = line.match(/HEAD is now at\s+([a-f0-9]{7,40})/);
+        if (headMatch) {
+            currentCommit = headMatch[1];
+        }
+        // "Fetching the repository" with --depth
+        const depthMatch = line.match(/--depth[= ](\d+)/);
+        if (depthMatch) {
+            currentDepth = depthMatch[1];
+        }
+        // "fetch-depth: N" from logged step inputs
+        const fetchDepthInput = line.match(/fetch-depth:\s*(\d+)/);
+        if (fetchDepthInput) {
+            currentDepth = fetchDepthInput[1] === '0' ? 'full' : fetchDepthInput[1];
+        }
+        // "git clone https://github.com/owner/repo ..."
+        const cloneMatch = line.match(/git\s+clone\s+(?:--[^\s]+\s+)*(?:https?:\/\/github\.com\/)?([^\s'"]+)/i);
+        if (cloneMatch && !syncMatch) {
+            const clonedRepo = cloneMatch[1].replace(/\.git$/, '');
+            if (clonedRepo.includes('/') && !seen.has(clonedRepo)) {
+                seen.add(clonedRepo);
+                repos.push({ repository: clonedRepo, branch: '—', commit: '—', depth: 'full' });
+            }
+        }
+        // "git fetch origin branch-name"
+        const fetchBranch = line.match(/git\s+fetch\s+\S+\s+(\S+)/i);
+        if (fetchBranch && currentRepo) {
+            const fetched = fetchBranch[1].replace(/^refs\/heads\//, '');
+            if (!currentBranch && !fetched.startsWith('-'))
+                currentBranch = fetched;
+        }
+    }
+    if (currentRepo && !seen.has(currentRepo)) {
+        seen.add(currentRepo);
+        repos.push({ repository: currentRepo, branch: currentBranch || '—', commit: currentCommit || '—', depth: currentDepth || 'full' });
+    }
+    return repos.slice(0, 20);
+}
+function extractGitRefsFromSteps(steps, jobLogs) {
+    const refs = [];
+    const seen = new Set();
+    // Parse "uses:" lines from logs: "##[group]Run actions/checkout@v4"
+    const lines = jobLogs.split('\n');
+    for (const raw of lines) {
+        const cleaned = cleanLine(raw);
+        const runAction = cleaned.match(/^Run\s+([a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+)@(\S+)/);
+        if (runAction) {
+            const repo = runAction[1];
+            const ref = runAction[2];
+            const uid = `${repo}@${ref}`;
+            if (!seen.has(uid)) {
+                seen.add(uid);
+                refs.push({ repo, ref, type: 'action' });
+            }
+        }
+    }
+    return refs;
+}
 function extractFailedStep(lines) {
     for (const line of lines) {
         const clean = cleanLine(line);
@@ -30066,19 +30321,24 @@ async function analyzeLogs(logs, patterns, stepName) {
     const rawLines = logs.split('\n');
     const totalLines = rawLines.length;
     const errorLines = [];
-    // Clean and collect error lines with their original line numbers
+    const warningLines = [];
     const cleanedLines = rawLines.map((raw, i) => ({
         cleaned: cleanLine(raw),
         lineNumber: i + 1
     }));
-    // Collect lines that look like errors (after cleaning)
     for (const { cleaned } of cleanedLines) {
-        if (/error|failed|fatal|exception|FAIL|ERR!/i.test(cleaned) && cleaned.length > 0) {
+        if (cleaned.length === 0)
+            continue;
+        if (/error|failed|fatal|exception|FAIL|ERR!/i.test(cleaned)) {
             errorLines.push(cleaned);
         }
+        else if (/\bwarn(ing)?\b|WARN|⚠/i.test(cleaned) && !/^\s*\d+\s+warn(ing)?s?\s*$/i.test(cleaned)) {
+            warningLines.push(cleaned);
+        }
     }
-    core.info(`Scanned ${totalLines} log lines, found ${errorLines.length} error lines`);
-    // Tier 1 — pattern matching on cleaned lines
+    const buildParams = extractBuildParams(rawLines);
+    core.info(`Scanned ${totalLines} log lines, found ${errorLines.length} error lines, ${warningLines.length} warning lines, ${buildParams.length} build params`);
+    const warningLinesByCategory = categorizeWarningLines(warningLines, patterns);
     for (const p of patterns) {
         const regex = new RegExp(p.pattern, p.flags);
         for (const { cleaned, lineNumber } of cleanedLines) {
@@ -30096,6 +30356,8 @@ async function analyzeLogs(logs, patterns, stepName) {
                     suggestion: p.suggestion,
                     errorLines,
                     errorLinesByCategory,
+                    warningLines,
+                    warningLinesByCategory,
                     exactMatchLine: cleaned,
                     exactMatchLineNumber: lineNumber,
                     contextBefore,
@@ -30104,12 +30366,12 @@ async function analyzeLogs(logs, patterns, stepName) {
                     severity: p.severity,
                     matchedPattern: p.id,
                     category: p.category,
-                    docsUrl: p.docsUrl
+                    docsUrl: p.docsUrl,
+                    buildParams
                 };
             }
         }
     }
-    // No pattern matched — generic fallback
     const errorLinesByCategory = categorizeErrorLines(errorLines, patterns);
     return {
         rootCause: 'Unknown failure — could not automatically detect root cause',
@@ -30117,6 +30379,8 @@ async function analyzeLogs(logs, patterns, stepName) {
         suggestion: 'Review the error lines below. Consider adding a custom pattern to patterns.json to handle this error in future runs.',
         errorLines,
         errorLinesByCategory,
+        warningLines,
+        warningLinesByCategory,
         exactMatchLine: errorLines[0] || '',
         exactMatchLineNumber: 0,
         contextBefore: [],
@@ -30124,7 +30388,8 @@ async function analyzeLogs(logs, patterns, stepName) {
         totalLines,
         severity: 'warning',
         matchedPattern: 'none',
-        category: 'Unknown'
+        category: 'Unknown',
+        buildParams
     };
 }
 
@@ -30243,6 +30508,77 @@ const SEVERITY_EMOJI = {
     warning: '🟡',
     info: '🔵'
 };
+function buildWarningsSection(warningLines, warningLinesByCategory, maxLines) {
+    if (warningLines.length === 0)
+        return '';
+    const categories = Object.keys(warningLinesByCategory).sort();
+    const parts = [];
+    let linesShown = 0;
+    const truncated = warningLines.length > maxLines;
+    for (const cat of categories) {
+        const lines = warningLinesByCategory[cat];
+        const remaining = maxLines - linesShown;
+        const showLines = truncated ? lines.slice(0, Math.min(lines.length, Math.max(0, remaining))) : lines;
+        const hidden = lines.length - showLines.length;
+        const content = showLines.map(line => `   ${line}`).join('\n');
+        const suffix = hidden > 0 ? `\n   ... ${hidden} more` : '';
+        const header = hidden > 0 ? `${cat} (${showLines.length}/${lines.length})` : `${cat} (${lines.length})`;
+        parts.push(`<details>
+<summary>${header}</summary>
+
+\`\`\`text
+${content}${suffix}
+\`\`\`
+</details>`);
+        linesShown += showLines.length;
+        if (linesShown >= maxLines && truncated)
+            break;
+    }
+    return parts.join('\n\n');
+}
+function buildBuildParamsSection(params) {
+    if (params.length === 0)
+        return '';
+    const rows = params.map(p => {
+        const displayValue = p.value.length > 60 ? p.value.slice(0, 57) + '...' : p.value;
+        return `| \`${p.key}\` | \`${displayValue}\` | ${p.source} |`;
+    });
+    return `| Parameter | Value | Source |
+|:----------|:------|:-------|
+${rows.join('\n')}`;
+}
+function buildClonedReposTable(repos) {
+    if (repos.length === 0)
+        return '';
+    const rows = repos.map(r => {
+        const repoLink = r.repository.includes('/')
+            ? `[${r.repository}](https://github.com/${r.repository})`
+            : `\`${r.repository}\``;
+        const commitDisplay = r.commit !== '—' ? `\`${r.commit.substring(0, 7)}\`` : '—';
+        return `| ${repoLink} | \`${r.branch}\` | ${commitDisplay} | ${r.depth} |`;
+    });
+    return `| Repository | Branch / Tag | Commit | Depth |
+|:-----------|:-------------|:-------|:------|
+${rows.join('\n')}`;
+}
+function buildActionsAndImagesTable(refs) {
+    const filtered = refs.filter(r => r.type === 'action' || r.type === 'docker');
+    if (filtered.length === 0)
+        return '';
+    const typeEmojis = { action: '🔧', docker: '🐳' };
+    const typeLabels = { action: 'Action', docker: 'Docker' };
+    const rows = filtered.map(r => {
+        const emoji = typeEmojis[r.type] || '📌';
+        const label = typeLabels[r.type] || r.type;
+        const repoDisplay = r.type === 'action'
+            ? `[${r.repo}](https://github.com/${r.repo})`
+            : `\`${r.repo}\``;
+        return `| ${emoji} ${label} | ${repoDisplay} | \`${r.ref}\` |`;
+    });
+    return `| Type | Repository / Image | Ref / Tag |
+|:-----|:-------------------|:----------|
+${rows.join('\n')}`;
+}
 function formatBytes(bytes) {
     if (bytes < 1024)
         return `${bytes} B`;
@@ -30262,14 +30598,22 @@ function buildArtifactsAndLinksSection(runUrl, artifacts, extractedLinks, repo) 
     }
     if (extractedLinks.length > 0) {
         for (const { url, label } of extractedLinks) {
-            const display = label || 'Extracted link';
+            let display = label || '';
+            if (!display) {
+                try {
+                    display = new URL(url).hostname.replace(/^www\./, '');
+                }
+                catch {
+                    display = 'Link';
+                }
+            }
             const shortUrl = url.length > 55 ? url.slice(0, 52) + '…' : url;
             parts.push(`| [${display}](${url}) | ${shortUrl} |`);
         }
     }
     return parts.join('\n');
 }
-function formatPRComment(analysis, jobName, runUrl, steps, repo, branch, commit, artifacts = [], extractedLinks = []) {
+function formatPRComment(analysis, jobName, runUrl, steps, repo, branch, commit, artifacts = [], extractedLinks = [], gitRefs = [], clonedRepos = []) {
     const passedCount = steps.filter(s => s.conclusion === 'success').length;
     const totalCount = steps.length;
     const stepBar = steps.map(s => s.conclusion === 'success' ? '🟢' :
@@ -30316,14 +30660,26 @@ ${exactMatchLine}
 ### Suggested Fix
 ${analysis.suggestion}${docsLink}
 ${errorBlock}
-
+${analysis.warningLines.length > 0 ? `
+### Warnings (${analysis.warningLines.length})
+${buildWarningsSection(analysis.warningLines, analysis.warningLinesByCategory, 10)}
+` : ''}${analysis.buildParams.length > 0 ? `
+### Build Parameters
+${buildBuildParamsSection(analysis.buildParams)}
+` : ''}${clonedRepos.length > 0 ? `
+### Cloned Repositories
+${buildClonedReposTable(clonedRepos)}
+` : ''}${gitRefs.filter(r => r.type === 'action' || r.type === 'docker').length > 0 ? `
+### Actions & Docker Images
+${buildActionsAndImagesTable(gitRefs)}
+` : ''}
 ### Artifacts & Links
 ${buildArtifactsAndLinksSection(runUrl, artifacts, extractedLinks, repo)}
 
 ---
 *[Action Log Analyzer](https://github.com/SKCloudOps/action-log-analyzer)*`;
 }
-function formatJobSummary(analysis, jobName, runUrl, steps, triggeredBy, branch, commit, repo, artifacts = [], extractedLinks = []) {
+function formatJobSummary(analysis, jobName, runUrl, steps, triggeredBy, branch, commit, repo, artifacts = [], extractedLinks = [], gitRefs = [], clonedRepos = []) {
     const label = SEVERITY_LABEL[analysis.severity];
     const emoji = SEVERITY_EMOJI[analysis.severity];
     const now = new Date().toUTCString();
@@ -30378,14 +30734,34 @@ ${analysis.suggestion}${docsLink}
 ${buildGroupedErrorBlockSummary(analysis.errorLinesByCategory || {}, analysis.exactMatchLine, MAX_ERROR_LINES, runUrl, analysis.errorLines.length)}
 
 ---
+${analysis.warningLines.length > 0 ? `
+## Warnings (${analysis.warningLines.length})
+${buildWarningsSection(analysis.warningLines, analysis.warningLinesByCategory, MAX_ERROR_LINES)}
 
+---
+` : ''}${analysis.buildParams.length > 0 ? `
+## Build Parameters
+${buildBuildParamsSection(analysis.buildParams)}
+
+---
+` : ''}${clonedRepos.length > 0 ? `
+## Cloned Repositories
+${buildClonedReposTable(clonedRepos)}
+
+---
+` : ''}${gitRefs.filter(r => r.type === 'action' || r.type === 'docker').length > 0 ? `
+## Actions & Docker Images
+${buildActionsAndImagesTable(gitRefs)}
+
+---
+` : ''}
 ## Artifacts & Links
 ${buildArtifactsAndLinksSection(runUrl, artifacts, extractedLinks, repo)}
 
 ---
 *Action Log Analyzer · ${now}*`;
 }
-function formatSuccessSummary(runUrl, jobs, triggeredBy, branch, commit, repo, artifacts = [], extractedLinks = []) {
+function formatSuccessSummary(runUrl, jobs, triggeredBy, branch, commit, repo, artifacts = [], extractedLinks = [], warningLines = [], warningLinesByCategory = {}, buildParams = [], gitRefs = [], clonedRepos = []) {
     const now = new Date().toUTCString();
     const jobRows = jobs.map(job => {
         const icon = job.conclusion === 'success' ? '✅' : job.conclusion === 'failure' ? '❌' : '⏳';
@@ -30417,24 +30793,6 @@ function formatSuccessSummary(runUrl, jobs, triggeredBy, branch, commit, repo, a
 |:--|:-----|:----|:------:|:---------|
 ${stepRows}`;
     }
-    const coverageLinks = extractedLinks.filter(l => l.label === 'Coverage report');
-    const reportLinks = extractedLinks.filter(l => l.label && l.label !== 'Coverage report');
-    let coverageSection = '';
-    if (coverageLinks.length > 0 || reportLinks.length > 0) {
-        const parts = [];
-        if (coverageLinks.length > 0) {
-            parts.push(`| Coverage | ${coverageLinks.map(l => `[${l.label}](${l.url})`).join(' · ')} |`);
-        }
-        if (reportLinks.length > 0) {
-            parts.push(`| Reports | ${reportLinks.slice(0, 5).map(l => `[${l.label}](${l.url})`).join(' · ')} |`);
-        }
-        coverageSection = `
-
-### Coverage & Reports
-| Type | Link |
-|:-----|:-----|
-${parts.join('\n')}`;
-    }
     return `# Log Analyzer Report
 
 ## All Jobs Passed
@@ -30456,15 +30814,26 @@ ${jobRows}
 | Jobs passed | ${jobs.length} |
 | Steps completed | ${passedSteps}/${totalSteps} |
 ${timelineSection}
-${coverageSection}
 
-### Artifacts & Links
+${warningLines.length > 0 ? `### Warnings (${warningLines.length})
+${buildWarningsSection(warningLines, warningLinesByCategory, 10)}
+
+` : ''}${buildParams.length > 0 ? `### Build Parameters
+${buildBuildParamsSection(buildParams)}
+
+` : ''}${clonedRepos.length > 0 ? `### Cloned Repositories
+${buildClonedReposTable(clonedRepos)}
+
+` : ''}${gitRefs.filter(r => r.type === 'action' || r.type === 'docker').length > 0 ? `### Actions & Docker Images
+${buildActionsAndImagesTable(gitRefs)}
+
+` : ''}### Artifacts & Links
 ${buildArtifactsAndLinksSection(runUrl, artifacts, extractedLinks, repo)}
 
 ---
 *Action Log Analyzer · ${now}*`;
 }
-function formatSuccessPRComment(jobNames, runUrl, artifacts = [], extractedLinks = []) {
+function formatSuccessPRComment(jobNames, runUrl, artifacts = [], extractedLinks = [], warningLines = [], warningLinesByCategory = {}, buildParams = [], gitRefs = [], clonedRepos = []) {
     const jobsList = jobNames.map(n => `\`${n}\``).join(', ');
     let extra = `\n\n[View workflow run](${runUrl})`;
     if (artifacts.length > 0 || extractedLinks.length > 0) {
@@ -30473,20 +30842,36 @@ function formatSuccessPRComment(jobNames, runUrl, artifacts = [], extractedLinks
             parts.push(`**Artifacts:** ${artifacts.map(a => `\`${a.name}\` (${Math.round(a.size_in_bytes / 1024)} KB)`).join(', ')}`);
         }
         if (extractedLinks.length > 0) {
-            const coverage = extractedLinks.filter(l => l.label === 'Coverage report');
-            if (coverage.length > 0) {
-                parts.push(`**Coverage:** ${coverage.map(l => `[${l.label}](${l.url})`).join(', ')}`);
-            }
-            const other = extractedLinks.filter(l => !l.label || l.label !== 'Coverage report');
-            if (other.length > 0) {
-                parts.push(`**Links:** ${other.slice(0, 5).map(l => `[${l.label || 'link'}](${l.url})`).join(', ')}`);
-            }
+            parts.push(`**Links:** ${extractedLinks.slice(0, 5).map(l => {
+                let display = l.label || '';
+                if (!display) {
+                    try {
+                        display = new URL(l.url).hostname.replace(/^www\./, '');
+                    }
+                    catch {
+                        display = 'Link';
+                    }
+                }
+                return `[${display}](${l.url})`;
+            }).join(', ')}`);
         }
         extra = `\n\n${parts.join('\n\n')}\n\n[View workflow run & download](${runUrl})`;
     }
+    const warningSection = warningLines.length > 0
+        ? `\n\n### Warnings (${warningLines.length})\n${buildWarningsSection(warningLines, warningLinesByCategory, 10)}`
+        : '';
+    const paramsSection = buildParams.length > 0
+        ? `\n\n### Build Parameters\n${buildBuildParamsSection(buildParams)}`
+        : '';
+    const clonedSection = clonedRepos.length > 0
+        ? `\n\n### Cloned Repositories\n${buildClonedReposTable(clonedRepos)}`
+        : '';
+    const actionsSection = gitRefs.filter(r => r.type === 'action' || r.type === 'docker').length > 0
+        ? `\n\n### Actions & Docker Images\n${buildActionsAndImagesTable(gitRefs)}`
+        : '';
     return `## Log Analyzer Report
 
-All jobs completed successfully: ${jobsList}${extra}
+All jobs completed successfully: ${jobsList}${warningSection}${paramsSection}${clonedSection}${actionsSection}${extra}
 
 ---
 *[Action Log Analyzer](https://github.com/SKCloudOps/action-log-analyzer) · [Report issue](https://github.com/SKCloudOps/action-log-analyzer/issues)*`;
@@ -30538,20 +30923,113 @@ const core = __importStar(__nccwpck_require__(7484));
 const github = __importStar(__nccwpck_require__(3228));
 const analyzer_1 = __nccwpck_require__(8561);
 const formatter_1 = __nccwpck_require__(1845);
+function cleanLogLine(raw) {
+    return raw
+        .replace(/^\d{4}-\d{2}-\d{2}T[\d:.]+Z\s+/, '')
+        .replace(/\x1b\[[0-9;]*[mGKHF]/g, '')
+        .replace(/##\[(?:error|warning|debug|group|endgroup)\]/g, '')
+        .trim();
+}
+function extractWarningsFromLogs(logs) {
+    const lines = logs.split('\n');
+    const warnings = [];
+    for (const raw of lines) {
+        const cleaned = cleanLogLine(raw);
+        if (cleaned.length === 0)
+            continue;
+        if (/\bwarn(ing)?\b|WARN|⚠/i.test(cleaned) && !/^\s*\d+\s+warn(ing)?s?\s*$/i.test(cleaned)) {
+            if (!/error|failed|fatal|exception|FAIL|ERR!/i.test(cleaned)) {
+                warnings.push(cleaned);
+            }
+        }
+    }
+    return warnings;
+}
+function categorizeWarnings(warningLines) {
+    const byCategory = {};
+    for (const line of warningLines) {
+        let cat = 'General';
+        if (/deprecat/i.test(line))
+            cat = 'Deprecation';
+        else if (/npm\s+warn|npm\s+WARN/i.test(line))
+            cat = 'npm';
+        else if (/pip|python|setuptools/i.test(line))
+            cat = 'Python';
+        else if (/docker/i.test(line))
+            cat = 'Docker';
+        else if (/security|vuln/i.test(line))
+            cat = 'Security';
+        else if (/permission|access/i.test(line))
+            cat = 'Permissions';
+        if (!byCategory[cat])
+            byCategory[cat] = [];
+        byCategory[cat].push(line);
+    }
+    return byCategory;
+}
+function extractDomain(url) {
+    try {
+        return new URL(url).hostname.replace(/^www\./, '');
+    }
+    catch {
+        return url.length > 30 ? url.slice(0, 27) + '...' : url;
+    }
+}
+// github.com URLs allowed through — everything else on github.com is dropped
+const GITHUB_ALLOW_PATTERNS = [
+    /github\.com\/[^/]+\/[^/]+\/releases\/download\//i,
+    /github\.com\/[^/]+\/[^/]+\/suites\/.*\/artifacts/i,
+    /github\.com\/[^/]+\/[^/]+\/actions\/artifacts/i,
+];
+const LABEL_MATCHERS = [
+    { test: /\.jfrog\.(io|com)|artifactory/i, label: 'Artifactory' },
+    { test: /nexus|sonatype/i, label: 'Nexus' },
+    { test: /s3\.amazonaws\.com|s3-[a-z-]+\.amazonaws/i, label: 'S3 artifact' },
+    { test: /storage\.googleapis\.com|storage\.cloud\.google/i, label: 'GCS artifact' },
+    { test: /blob\.core\.windows\.net|azurewebsites/i, label: 'Azure artifact' },
+    { test: /\.azurecr\.io/i, label: 'Azure Container Registry' },
+    { test: /registry\.npmjs\.org/i, label: 'npm registry' },
+    { test: /pypi\.org|files\.pythonhosted/i, label: 'PyPI' },
+    { test: /registry-1\.docker\.io|hub\.docker\.com/i, label: 'Docker Hub' },
+    { test: /ghcr\.io/i, label: 'GitHub Container Registry' },
+    { test: /gcr\.io/i, label: 'Google Container Registry' },
+    { test: /\.ecr\.[a-z-]+\.amazonaws\.com/i, label: 'ECR' },
+    { test: /github\.com\/.*\/releases\/download/i, label: 'GitHub Release' },
+    { test: /github\.com\/.*\/artifacts/i, label: 'GitHub Artifact' },
+    { test: /codecov\.io/i, label: 'Codecov' },
+    { test: /coveralls\.io/i, label: 'Coveralls' },
+    { test: /sonarcloud\.io|sonarqube/i, label: 'SonarCloud' },
+    { test: /snyk\.io/i, label: 'Snyk' },
+];
+function classifyUrl(url) {
+    for (const { test, label } of LABEL_MATCHERS) {
+        if (test.test(url))
+            return label;
+    }
+    return extractDomain(url);
+}
+function isUsefulUrl(url) {
+    if (url.length <= 10 || url.length >= 500)
+        return false;
+    if (/github\.com/i.test(url)) {
+        return GITHUB_ALLOW_PATTERNS.some(p => p.test(url));
+    }
+    if (/api\.github\.com/i.test(url))
+        return false;
+    return true;
+}
 function extractLinksFromLogs(logs) {
     const urlRegex = /https?:\/\/[^\s\)\]\>"\']+/g;
     const found = new Set();
     const links = [];
     for (const match of logs.matchAll(urlRegex)) {
-        let url = match[0].replace(/[.,;:!?]+$/, '');
-        if (url.length > 10 && url.length < 500 && !found.has(url) && !url.includes('github.com')) {
-            found.add(url);
-            const label = url.includes('coverage') ? 'Coverage report' :
-                url.includes('test') || url.includes('report') ? 'Test/report' : undefined;
-            links.push({ url, label });
-        }
+        const url = match[0].replace(/[.,;:!?]+$/, '');
+        if (found.has(url) || !isUsefulUrl(url))
+            continue;
+        found.add(url);
+        links.push({ url, label: classifyUrl(url) });
     }
-    return links.slice(0, 15); // limit to 15
+    return links.slice(0, 20);
 }
 async function run() {
     try {
@@ -30597,8 +31075,11 @@ async function run() {
             core.info('No failed jobs. Posting success summary.');
             // Only show completed jobs (exclude in-progress e.g. analyze-logs itself)
             const completedJobs = jobsData.jobs.filter(j => j.conclusion != null);
-            // Fetch logs from successful jobs to extract coverage/links
             let extractedLinks = [];
+            let allWarnings = [];
+            let allBuildParams = [];
+            let allGitRefs = [];
+            let allClonedRepos = [];
             const successfulJobs = jobsData.jobs.filter(j => j.conclusion === 'success');
             for (const job of successfulJobs.slice(0, 3)) {
                 try {
@@ -30606,7 +31087,13 @@ async function run() {
                         owner, repo, job_id: job.id
                     });
                     const logs = logsResponse.data;
+                    const logLines = logs.split('\n');
                     extractedLinks = [...extractedLinks, ...extractLinksFromLogs(logs)];
+                    allWarnings = [...allWarnings, ...extractWarningsFromLogs(logs)];
+                    allBuildParams = [...allBuildParams, ...(0, analyzer_1.extractBuildParams)(logLines)];
+                    allGitRefs = [...allGitRefs, ...(0, analyzer_1.extractGitRefsFromLogs)(logLines)];
+                    allGitRefs = [...allGitRefs, ...(0, analyzer_1.extractGitRefsFromSteps)(job.steps ?? [], logs)];
+                    allClonedRepos = [...allClonedRepos, ...(0, analyzer_1.extractClonedRepos)(logLines)];
                     const seen = new Set();
                     extractedLinks = extractedLinks.filter(l => {
                         if (seen.has(l.url))
@@ -30619,15 +31106,53 @@ async function run() {
                     /* skip if logs unavailable */
                 }
             }
+            // Deduplicate
+            allWarnings = [...new Set(allWarnings)];
+            const seenParams = new Set();
+            allBuildParams = allBuildParams.filter(p => {
+                const uid = `${p.key}=${p.value}`;
+                if (seenParams.has(uid))
+                    return false;
+                seenParams.add(uid);
+                return true;
+            }).slice(0, 30);
+            const seenRefs = new Set();
+            allGitRefs = allGitRefs.filter(r => {
+                const uid = `${r.type}:${r.repo}@${r.ref}`;
+                if (seenRefs.has(uid))
+                    return false;
+                seenRefs.add(uid);
+                return true;
+            }).slice(0, 40);
+            const seenCloned = new Set();
+            allClonedRepos = allClonedRepos.filter(r => {
+                if (seenCloned.has(r.repository))
+                    return false;
+                seenCloned.add(r.repository);
+                return true;
+            }).slice(0, 20);
+            const warningLinesByCategory = categorizeWarnings(allWarnings);
+            if (allWarnings.length > 0) {
+                core.info(`Found ${allWarnings.length} warning(s) in successful job logs`);
+            }
+            if (allBuildParams.length > 0) {
+                core.info(`Detected ${allBuildParams.length} build parameter(s)`);
+            }
+            if (allGitRefs.length > 0) {
+                core.info(`Detected ${allGitRefs.length} action/docker reference(s)`);
+            }
+            if (allClonedRepos.length > 0) {
+                core.info(`Detected ${allClonedRepos.length} cloned repository(ies)`);
+            }
             if (postSummary) {
-                const successSummary = (0, formatter_1.formatSuccessSummary)(runUrl, completedJobs, triggeredBy, branch, commit, repoFullName, artifacts, extractedLinks);
+                const successSummary = (0, formatter_1.formatSuccessSummary)(runUrl, completedJobs, triggeredBy, branch, commit, repoFullName, artifacts, extractedLinks, allWarnings, warningLinesByCategory, allBuildParams, allGitRefs, allClonedRepos);
                 await core.summary.addRaw(successSummary).write();
                 core.info('Success summary posted.');
             }
             if (postComment && context.payload.pull_request) {
                 const prNumber = context.payload.pull_request.number;
                 const jobNames = completedJobs.map(j => j.name);
-                const comment = (0, formatter_1.formatSuccessPRComment)(jobNames, runUrl, artifacts, extractedLinks);
+                const comment = (0, formatter_1.formatSuccessPRComment)(jobNames, runUrl, artifacts, extractedLinks, allWarnings, warningLinesByCategory, allBuildParams, allGitRefs, allClonedRepos);
                 const { data: comments } = await octokit.rest.issues.listComments({
                     owner, repo, issue_number: prNumber
                 });
@@ -30651,6 +31176,9 @@ async function run() {
             core.setOutput('suggestion', '');
             core.setOutput('matched-pattern', 'none');
             core.setOutput('category', 'Success');
+            core.setOutput('warning-count', String(allWarnings.length));
+            core.setOutput('build-params', JSON.stringify(allBuildParams));
+            core.setOutput('git-refs', JSON.stringify(allGitRefs));
             core.info('Action Log Analyzer complete.');
             return;
         }
@@ -30672,29 +31200,48 @@ async function run() {
                     .join('\n') || '';
             }
             const failedStep = job.steps?.find(s => s.conclusion === 'failure')?.name;
-            // Analyze using pattern matching
             const analysis = await (0, analyzer_1.analyzeLogs)(logs, patterns, failedStep);
-            // Extract notable URLs from logs (coverage, test results, reports, etc.)
             const extractedLinks = extractLinksFromLogs(logs);
+            const logLines = logs.split('\n');
+            let jobGitRefs = [
+                ...(0, analyzer_1.extractGitRefsFromLogs)(logLines),
+                ...(0, analyzer_1.extractGitRefsFromSteps)(job.steps ?? [], logs)
+            ];
+            const seenJobRefs = new Set();
+            jobGitRefs = jobGitRefs.filter(r => {
+                const uid = `${r.type}:${r.repo}@${r.ref}`;
+                if (seenJobRefs.has(uid))
+                    return false;
+                seenJobRefs.add(uid);
+                return true;
+            }).slice(0, 40);
+            const jobClonedRepos = (0, analyzer_1.extractClonedRepos)(logLines);
             core.info(`Root cause: ${analysis.rootCause}`);
             core.info(`Category: ${analysis.category}`);
             core.info(`Matched pattern: ${analysis.matchedPattern}`);
-            // Set outputs
+            if (jobGitRefs.length > 0) {
+                core.info(`Detected ${jobGitRefs.length} action/docker reference(s)`);
+            }
+            if (jobClonedRepos.length > 0) {
+                core.info(`Detected ${jobClonedRepos.length} cloned repository(ies)`);
+            }
             core.setOutput('root-cause', analysis.rootCause);
             core.setOutput('failed-step', analysis.failedStep);
             core.setOutput('suggestion', analysis.suggestion);
             core.setOutput('matched-pattern', analysis.matchedPattern);
             core.setOutput('category', analysis.category);
-            // Post job summary
+            core.setOutput('warning-count', String(analysis.warningLines.length));
+            core.setOutput('build-params', JSON.stringify(analysis.buildParams));
+            core.setOutput('git-refs', JSON.stringify(jobGitRefs));
             if (postSummary) {
-                const summary = (0, formatter_1.formatJobSummary)(analysis, job.name, runUrl, job.steps ?? [], triggeredBy, branch, commit, repoFullName, artifacts, extractedLinks);
+                const summary = (0, formatter_1.formatJobSummary)(analysis, job.name, runUrl, job.steps ?? [], triggeredBy, branch, commit, repoFullName, artifacts, extractedLinks, jobGitRefs, jobClonedRepos);
                 await core.summary.addRaw(summary).write();
                 core.info('Job summary posted.');
             }
             // Post PR comment
             if (postComment && context.payload.pull_request) {
                 const prNumber = context.payload.pull_request.number;
-                const comment = (0, formatter_1.formatPRComment)(analysis, job.name, runUrl, job.steps ?? [], repoFullName, branch, commit, artifacts, extractedLinks);
+                const comment = (0, formatter_1.formatPRComment)(analysis, job.name, runUrl, job.steps ?? [], repoFullName, branch, commit, artifacts, extractedLinks, jobGitRefs, jobClonedRepos);
                 const { data: comments } = await octokit.rest.issues.listComments({
                     owner, repo, issue_number: prNumber
                 });
