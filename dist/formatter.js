@@ -2,7 +2,17 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.formatPRComment = formatPRComment;
 exports.formatJobSummary = formatJobSummary;
+exports.formatSuccessSummary = formatSuccessSummary;
+exports.formatSuccessPRComment = formatSuccessPRComment;
 const MAX_ERROR_LINES = 10;
+function formatDuration(ms) {
+    const sec = Math.round(ms / 1000);
+    if (sec < 60)
+        return `${sec}s`;
+    const m = Math.floor(sec / 60);
+    const s = sec % 60;
+    return s > 0 ? `${m}m ${s}s` : `${m}m`;
+}
 function buildGroupedErrorBlock(errorLinesByCategory, exactMatchLine, maxLines, runUrl, totalCount) {
     const categories = Object.keys(errorLinesByCategory).sort();
     if (categories.length === 0)
@@ -96,111 +106,105 @@ const SEVERITY_EMOJI = {
     warning: '🟡',
     info: '🔵'
 };
-function formatPRComment(analysis, jobName, runUrl) {
-    const label = SEVERITY_LABEL[analysis.severity];
-    const exactMatchBlock = buildErrorContextBlock(analysis);
+function formatPRComment(analysis, jobName, runUrl, steps, repo, branch, commit) {
+    const passedCount = steps.filter(s => s.conclusion === 'success').length;
+    const totalCount = steps.length;
+    const stepBar = steps.map(s => s.conclusion === 'success' ? '🟢' :
+        s.conclusion === 'failure' ? '🔴' :
+            s.conclusion === 'skipped' ? '⏭️' : '🟡').join('');
+    const failedIdx = steps.findIndex(s => s.conclusion === 'failure');
+    const commandRows = steps.map((step, i) => {
+        const icon = step.conclusion === 'success' ? '✅' : step.conclusion === 'failure' ? '❌' : '⏳';
+        const duration = step.started_at && step.completed_at
+            ? formatDuration(new Date(step.completed_at).getTime() - new Date(step.started_at).getTime())
+            : '—';
+        const failedMarker = i === failedIdx ? '\n                                             ↑ FAILED HERE' : '';
+        return `| ${i + 1} | ${step.name} | ${icon} | ${duration} |${failedMarker}`;
+    }).join('\n');
+    const exactMatchLine = (analysis.exactMatchLine || 'No exact match').replace(/`/g, '\\`').replace(/\n/g, ' ');
+    const docsLink = analysis.docsUrl ? `\n\n[Related documentation](${analysis.docsUrl})` : '';
     const MAX_LINES = 10;
     const errorBlock = buildGroupedErrorBlock(analysis.errorLinesByCategory || {}, analysis.exactMatchLine, MAX_LINES, runUrl, analysis.errorLines.length);
-    const docsLink = analysis.docsUrl ? `\n\n[Related documentation](${analysis.docsUrl})` : '';
-    return `## Log Analyzer Report
+    return `## Action Log Analyzer — ${jobName} Build Report
 
-| | |
-|:--|:--|
-| **Job** | \`${jobName}\` |
-| **Severity** | ${label} |
-| **Logs** | [View full workflow run](${runUrl}) |
+\`${repo}\` · \`${branch}\` · \`${commit.substring(0, 7)}\`
 
-> [!CAUTION]
-> **Root Cause**
-> ${analysis.rootCause}
+${stepBar}  **${passedCount}/${totalCount} steps passed**
 
-**Failed Step:** \`${analysis.failedStep}\`${exactMatchBlock}
+### Health Scorecard
+| Category | Score | Value | Status |
+|:---------|:------|:------|:-------|
+| Build | ${analysis.category} | ${analysis.totalLines.toLocaleString()} lines | ${SEVERITY_EMOJI[analysis.severity]} ${SEVERITY_LABEL[analysis.severity]} |
+| Pattern | \`${analysis.matchedPattern}\` | ${analysis.errorLines.length} error lines | matched |
 
-> [!TIP]
-> **Suggested Fix**
-> ${analysis.suggestion}${docsLink}
+### Command Timeline
+| # | Command | Status | Duration |
+|:--|:--------|:------:|:---------|
+${commandRows}
+
+### Root Cause
+${analysis.rootCause}
+
+### Exact Error (line ${analysis.exactMatchLineNumber} of ${analysis.totalLines.toLocaleString()})
+\`\`\`text
+${exactMatchLine}
+\`\`\`
+
+### Suggested Fix
+${analysis.suggestion}${docsLink}
 ${errorBlock}
 
 ---
-*[Action Log Analyzer](https://github.com/SKCloudOps/action-log-analyzer) · [Report issue](https://github.com/SKCloudOps/action-log-analyzer/issues)*`;
+[View full workflow run](${runUrl}) · [Action Log Analyzer](https://github.com/SKCloudOps/action-log-analyzer) · [Report issue](https://github.com/SKCloudOps/action-log-analyzer/issues)`;
 }
 function formatJobSummary(analysis, jobName, runUrl, steps, triggeredBy, branch, commit, repo) {
     const label = SEVERITY_LABEL[analysis.severity];
     const emoji = SEVERITY_EMOJI[analysis.severity];
     const now = new Date().toUTCString();
-    // Timeline: compute offset from first step
-    const t0 = steps[0]?.started_at ? new Date(steps[0].started_at).getTime() : 0;
-    const stepRows = steps.map(step => {
-        const icon = step.conclusion === 'success' ? '✅' :
-            step.conclusion === 'failure' ? '❌' :
-                step.conclusion === 'skipped' ? '⏭️' :
-                    step.conclusion === 'cancelled' ? '🚫' : '⏳';
-        const duration = step.started_at && step.completed_at
-            ? `${Math.round((new Date(step.completed_at).getTime() - new Date(step.started_at).getTime()) / 1000)}s`
-            : '—';
-        const offset = step.started_at && t0
-            ? `+${Math.round((new Date(step.started_at).getTime() - t0) / 1000)}s`
-            : '—';
-        const isFailedStep = step.name === analysis.failedStep
-            ? ' (failed)'
-            : '';
-        return `| ${icon} | \`${step.name}\` | ${offset} | ${duration} | ${step.conclusion ?? 'in progress'} |${isFailedStep}`;
-    }).join('\n');
     const patternMeta = `Pattern: \`${analysis.matchedPattern}\` · Category: \`${analysis.category}\``;
-    const docsLink = analysis.docsUrl ? ` · [Documentation](${analysis.docsUrl})` : '';
-    const exactMatchLine = analysis.exactMatchLine || 'No exact match found';
-    const before = analysis.contextBefore || [];
-    const after = analysis.contextAfter || [];
-    const contextLines = [];
-    before.forEach(line => contextLines.push(`   ${line}`));
-    if (exactMatchLine)
-        contextLines.push(`>>> ${exactMatchLine}`);
-    after.forEach(line => contextLines.push(`   ${line}`));
-    const contextBlock = contextLines.length > 0 ? contextLines.join('\n') : exactMatchLine;
-    return `# Log Analyzer Report
+    const docsLink = analysis.docsUrl ? `\n\n[Documentation](${analysis.docsUrl})` : '';
+    const passedCount = steps.filter(s => s.conclusion === 'success').length;
+    const totalCount = steps.length;
+    const stepBar = steps.map(s => s.conclusion === 'success' ? '🟢' :
+        s.conclusion === 'failure' ? '🔴' :
+            s.conclusion === 'skipped' ? '⏭️' : '🟡').join('');
+    const failedIdx = steps.findIndex(s => s.conclusion === 'failure');
+    const commandRows = steps.map((step, i) => {
+        const icon = step.conclusion === 'success' ? '✅' : step.conclusion === 'failure' ? '❌' : '⏳';
+        const duration = step.started_at && step.completed_at
+            ? formatDuration(new Date(step.completed_at).getTime() - new Date(step.started_at).getTime())
+            : '—';
+        const failedMarker = i === failedIdx ? '\n                                             ↑ FAILED HERE' : '';
+        return `| ${i + 1} | ${step.name} | ${icon} | ${duration} |${failedMarker}`;
+    }).join('\n');
+    const exactMatchLine = (analysis.exactMatchLine || 'No exact match').replace(/`/g, '\\`').replace(/\n/g, ' ');
+    return `# Action Log Analyzer — ${jobName} Build Report
 
-## Summary
+\`${repo}\` · \`${branch}\` · [\`${commit.substring(0, 7)}\`](https://github.com/${repo}/commit/${commit})
 
-| Property | Value |
-|:---------|:------|
-| Repository | \`${repo}\` |
-| Branch | \`${branch}\` |
-| Commit | [\`${commit.substring(0, 7)}\`](https://github.com/${repo}/commit/${commit}) |
-| Triggered by | \`${triggeredBy}\` |
-| Job | \`${jobName}\` |
-| Severity | ${emoji} ${label} |
-| Log lines scanned | ${analysis.totalLines.toLocaleString()} |
-| Analyzed | ${now} |
+${stepBar}  **${passedCount}/${totalCount} steps passed**
 
-> [!CAUTION]
-> **Root Cause**
-> ${analysis.rootCause}
->
-> *${patternMeta}*${docsLink}
+## Health Scorecard
+| Category | Score | Value | Status |
+|:---------|:------|:------|:-------|
+| Build | ${analysis.category} | ${analysis.totalLines.toLocaleString()} lines | ${emoji} ${label} |
+| Pattern | \`${analysis.matchedPattern}\` | ${analysis.errorLines.length} error lines | matched |
 
-**Failed Step:** \`${analysis.failedStep}\`
+## Command Timeline
+| # | Command | Status | Duration |
+|:--|:--------|:------:|:---------|
+${commandRows}
 
-### Error Output
-${analysis.exactMatchLineNumber > 0 ? ` *(line ${analysis.exactMatchLineNumber} of ${analysis.totalLines.toLocaleString()})*` : ''}
+## Root Cause
+${analysis.rootCause}
 
+## Exact Error (line ${analysis.exactMatchLineNumber} of ${analysis.totalLines.toLocaleString()})
 \`\`\`text
-${contextBlock}
+${exactMatchLine}
 \`\`\`
 
-> [!DANGER]
-> **Error:** \`${exactMatchLine.replace(/`/g, '\\`').replace(/\n/g, ' ')}\`
-
-> [!TIP]
-> **Suggested Fix**
-> ${analysis.suggestion}
-
----
-
-## Timeline
-
-| Status | Step | Offset | Duration | Result |
-|:------:|:-----|:------:|:--------:|:-------|
-${stepRows}
+## Suggested Fix
+${analysis.suggestion}${docsLink}
 
 ---
 
@@ -209,15 +213,45 @@ ${buildGroupedErrorBlockSummary(analysis.errorLinesByCategory || {}, analysis.ex
 
 ---
 
-## Links
-
-| Action | |
-|:-------|:--|
-| 🔗 View workflow run | [Open logs](${runUrl}) |
-| 📋 Add custom pattern | [patterns.json](https://github.com/${repo}/blob/main/patterns.json) |
-| 🐛 Report issue | [Open issue](https://github.com/SKCloudOps/action-log-analyzer/issues) |
-| 📖 Documentation | [README](https://github.com/SKCloudOps/action-log-analyzer#readme) |
+[View full workflow run](${runUrl}) · [Add custom pattern](https://github.com/${repo}/blob/main/patterns.json) · [Report issue](https://github.com/SKCloudOps/action-log-analyzer/issues)
 
 ---
 *Action Log Analyzer · ${now}*`;
+}
+function formatSuccessSummary(runUrl, jobs, triggeredBy, branch, commit, repo) {
+    const now = new Date().toUTCString();
+    const jobRows = jobs.map(job => {
+        const icon = job.conclusion === 'success' ? '✅' : job.conclusion === 'failure' ? '❌' : '⏳';
+        return `| ${icon} | \`${job.name}\` | ${job.conclusion ?? 'in progress'} |`;
+    }).join('\n');
+    return `# Log Analyzer Report
+
+## All Jobs Passed
+
+| Status | Job | Result |
+|:------:|:----|:-------|
+${jobRows}
+
+| Property | Value |
+|:---------|:------|
+| Repository | \`${repo}\` |
+| Branch | \`${branch}\` |
+| Commit | [\`${commit.substring(0, 7)}\`](https://github.com/${repo}/commit/${commit}) |
+| Triggered by | \`${triggeredBy}\` |
+
+[View workflow run](${runUrl})
+
+---
+*Action Log Analyzer · ${now}*`;
+}
+function formatSuccessPRComment(jobNames, runUrl) {
+    const jobsList = jobNames.map(n => `\`${n}\``).join(', ');
+    return `## Log Analyzer Report
+
+All jobs completed successfully: ${jobsList}
+
+[View workflow run](${runUrl})
+
+---
+*[Action Log Analyzer](https://github.com/SKCloudOps/action-log-analyzer) · [Report issue](https://github.com/SKCloudOps/action-log-analyzer/issues)*`;
 }
