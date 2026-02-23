@@ -50,12 +50,11 @@ function extractDomain(url: string): string {
   }
 }
 
-const GITHUB_NOISE_PATTERNS = [
-  /github\.com\/[^/]+\/[^/]+\/(tree|blob|commit|compare|pull|issues|actions\/runs\/\d+$)/,
-  /github\.com\/[^/]+\/[^/]+\/?$/,
-  /api\.github\.com\/repos\//,
-  /github\.com\/login/,
-  /github\.com\/settings/,
+// github.com URLs allowed through — everything else on github.com is dropped
+const GITHUB_ALLOW_PATTERNS = [
+  /github\.com\/[^/]+\/[^/]+\/releases\/download\//i,
+  /github\.com\/[^/]+\/[^/]+\/suites\/.*\/artifacts/i,
+  /github\.com\/[^/]+\/[^/]+\/actions\/artifacts/i,
 ]
 
 const LABEL_MATCHERS: { test: RegExp; label: string }[] = [
@@ -71,15 +70,12 @@ const LABEL_MATCHERS: { test: RegExp; label: string }[] = [
   { test: /ghcr\.io/i,                                           label: 'GitHub Container Registry' },
   { test: /gcr\.io/i,                                            label: 'Google Container Registry' },
   { test: /\.ecr\.[a-z-]+\.amazonaws\.com/i,                     label: 'ECR' },
-  { test: /github\.com\/[^/]+\/[^/]+\/releases\/download/i,     label: 'GitHub Release' },
-  { test: /github\.com\/[^/]+\/[^/]+\/suites\/.*\/artifacts/i,  label: 'GitHub Artifact' },
-  { test: /github\.com\/[^/]+\/[^/]+\/actions\/artifacts/i,     label: 'GitHub Artifact' },
+  { test: /github\.com\/.*\/releases\/download/i,                label: 'GitHub Release' },
+  { test: /github\.com\/.*\/artifacts/i,                         label: 'GitHub Artifact' },
   { test: /codecov\.io/i,                                        label: 'Codecov' },
   { test: /coveralls\.io/i,                                      label: 'Coveralls' },
   { test: /sonarcloud\.io|sonarqube/i,                           label: 'SonarCloud' },
   { test: /snyk\.io/i,                                           label: 'Snyk' },
-  { test: /coverage|lcov|htmlcov/i,                              label: 'Coverage report' },
-  { test: /test-results|junit|surefire|test-report/i,           label: 'Test report' },
 ]
 
 function classifyUrl(url: string): string {
@@ -89,12 +85,13 @@ function classifyUrl(url: string): string {
   return extractDomain(url)
 }
 
-function isNoiseUrl(url: string): boolean {
-  if (url.length <= 10 || url.length >= 500) return true
-  for (const pattern of GITHUB_NOISE_PATTERNS) {
-    if (pattern.test(url)) return true
+function isUsefulUrl(url: string): boolean {
+  if (url.length <= 10 || url.length >= 500) return false
+  if (/github\.com/i.test(url)) {
+    return GITHUB_ALLOW_PATTERNS.some(p => p.test(url))
   }
-  return false
+  if (/api\.github\.com/i.test(url)) return false
+  return true
 }
 
 function extractLinksFromLogs(logs: string): { url: string; label: string }[] {
@@ -103,7 +100,7 @@ function extractLinksFromLogs(logs: string): { url: string; label: string }[] {
   const links: { url: string; label: string }[] = []
   for (const match of logs.matchAll(urlRegex)) {
     const url = match[0].replace(/[.,;:!?]+$/, '')
-    if (found.has(url) || isNoiseUrl(url)) continue
+    if (found.has(url) || !isUsefulUrl(url)) continue
     found.add(url)
     links.push({ url, label: classifyUrl(url) })
   }
