@@ -30267,8 +30267,6 @@ function buildArtifactsAndLinksSection(runUrl, artifacts, extractedLinks, repo) 
             parts.push(`| [${display}](${url}) | ${shortUrl} |`);
         }
     }
-    parts.push(`| [Add custom pattern](https://github.com/${repo}/blob/main/patterns.json) | patterns.json |`);
-    parts.push(`| [Report issue](https://github.com/SKCloudOps/action-log-analyzer/issues) | Action Log Analyzer |`);
     return parts.join('\n');
 }
 function formatPRComment(analysis, jobName, runUrl, steps, repo, branch, commit, artifacts = [], extractedLinks = []) {
@@ -30546,11 +30544,10 @@ function extractLinksFromLogs(logs) {
     const links = [];
     for (const match of logs.matchAll(urlRegex)) {
         let url = match[0].replace(/[.,;:!?]+$/, '');
-        if (url.length > 10 && url.length < 500 && !found.has(url)) {
+        if (url.length > 10 && url.length < 500 && !found.has(url) && !url.includes('github.com')) {
             found.add(url);
             const label = url.includes('coverage') ? 'Coverage report' :
-                url.includes('test') || url.includes('report') ? 'Test/report' :
-                    url.includes('github.com') ? 'GitHub' : undefined;
+                url.includes('test') || url.includes('report') ? 'Test/report' : undefined;
             links.push({ url, label });
         }
     }
