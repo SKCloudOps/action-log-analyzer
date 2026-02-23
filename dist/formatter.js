@@ -256,20 +256,72 @@ function formatSuccessSummary(runUrl, jobs, triggeredBy, branch, commit, repo, a
         const icon = job.conclusion === 'success' ? '✅' : job.conclusion === 'failure' ? '❌' : '⏳';
         return `| ${icon} | \`${job.name}\` | ${job.conclusion ?? 'in progress'} |`;
     }).join('\n');
+    const totalSteps = jobs.reduce((sum, j) => sum + (j.steps?.length ?? 0), 0);
+    const passedSteps = jobs.reduce((sum, j) => sum + (j.steps?.filter(s => s.conclusion === 'success').length ?? 0), 0);
+    const stepBar = jobs.flatMap(j => j.steps ?? []).map(s => s.conclusion === 'success' ? '🟢' : s.conclusion === 'failure' ? '🔴' : '🟡').join('');
+    const stepBarDisplay = stepBar ? `\n\n${stepBar}  **${passedSteps}/${totalSteps} steps passed**` : '';
+    let timelineSection = '';
+    const allSteps = [];
+    for (const job of jobs) {
+        for (const step of job.steps ?? []) {
+            allSteps.push({ jobName: job.name, step });
+        }
+    }
+    if (allSteps.length > 0) {
+        const stepRows = allSteps.map(({ jobName, step }, i) => {
+            const icon = step.conclusion === 'success' ? '✅' : step.conclusion === 'failure' ? '❌' : '⏳';
+            const duration = step.started_at && step.completed_at
+                ? formatDuration(new Date(step.completed_at).getTime() - new Date(step.started_at).getTime())
+                : '—';
+            return `| ${i + 1} | \`${step.name}\` | ${jobName} | ${icon} | ${duration} |`;
+        }).join('\n');
+        timelineSection = `
+
+### Command Timeline
+| # | Step | Job | Status | Duration |
+|:--|:-----|:----|:------:|:---------|
+${stepRows}`;
+    }
+    const coverageLinks = extractedLinks.filter(l => l.label === 'Coverage report');
+    const reportLinks = extractedLinks.filter(l => l.label && l.label !== 'Coverage report');
+    let coverageSection = '';
+    if (coverageLinks.length > 0 || reportLinks.length > 0) {
+        const parts = [];
+        if (coverageLinks.length > 0) {
+            parts.push(`| Coverage | ${coverageLinks.map(l => `[${l.label}](${l.url})`).join(' · ')} |`);
+        }
+        if (reportLinks.length > 0) {
+            parts.push(`| Reports | ${reportLinks.slice(0, 5).map(l => `[${l.label}](${l.url})`).join(' · ')} |`);
+        }
+        coverageSection = `
+
+### Coverage & Reports
+| Type | Link |
+|:-----|:-----|
+${parts.join('\n')}`;
+    }
     return `# Log Analyzer Report
 
 ## All Jobs Passed
 
+\`${repo}\` · \`${branch}\` · [\`${commit.substring(0, 7)}\`](https://github.com/${repo}/commit/${commit})${stepBarDisplay}
+
+### Job Summary
 | Status | Job | Result |
 |:------:|:----|:-------|
 ${jobRows}
 
+### Run Overview
 | Property | Value |
 |:---------|:------|
 | Repository | \`${repo}\` |
 | Branch | \`${branch}\` |
 | Commit | [\`${commit.substring(0, 7)}\`](https://github.com/${repo}/commit/${commit}) |
 | Triggered by | \`${triggeredBy}\` |
+| Jobs passed | ${jobs.length} |
+| Steps completed | ${passedSteps}/${totalSteps} |
+${timelineSection}
+${coverageSection}
 
 ### Artifacts & Links
 ${buildArtifactsAndLinksSection(runUrl, artifacts, extractedLinks, repo)}
