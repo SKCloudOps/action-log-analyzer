@@ -1,5 +1,5 @@
 name: 'Action Log Analyzer'
-description: 'Log analysis for every run — useful for successes and failures. Extracts coverage, artifacts, root causes, and suggested fixes.'
+description: 'CI intelligence for every run — timing, test results, root cause analysis, annotations, retry awareness, and full build context for both successes and failures.'
 author: 'Sathish'
 
 branding:
@@ -45,6 +45,18 @@ outputs:
     description: 'JSON array of detected build parameters [{key, value, source}]'
   git-refs:
     description: 'JSON array of detected repositories, actions, and tags [{repo, ref, type}]'
+  total-duration:
+    description: 'Total job duration as human-readable string (e.g. "2m 30s")'
+  slowest-step:
+    description: 'Name of the slowest step in the job'
+  test-summary:
+    description: 'JSON object with test results {framework, passed, failed, skipped, total, failedTests}'
+  run-attempt:
+    description: 'Current run attempt number (1 for first run, higher for retries)'
+  run-number:
+    description: 'Workflow run number'
+  trigger-event:
+    description: 'Event that triggered the workflow (push, pull_request, schedule, etc.)'
 
 runs:
   using: 'node20'

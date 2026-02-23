@@ -1,9 +1,10 @@
 # Example: How to use Action Log Analyzer in your repository
 # Add this to YOUR repo's .github/workflows/ folder
 #
-# Action Log Analyzer is useful for BOTH successes and failures:
-# - On success: job status, artifacts, coverage reports, links from logs
-# - On failure: root cause analysis, suggested fixes, error context
+# Action Log Analyzer provides CI intelligence for BOTH successes and failures:
+# - On success: job durations, test results, annotations, slow step detection, warnings, build params, cloned repos, actions/docker refs, artifact URLs
+# - On failure: root cause, suggested fix, error context, test results, timing, annotations, warnings, build params, cloned repos, actions/docker refs, artifact URLs
+# - Always: retry awareness, workflow context (trigger event, workflow name, run number)
 
 name: CI
 

@@ -1,14 +1,15 @@
 # Action Log Analyzer
 
-> Log analysis for every run — useful for both **successes and failures**.
+> CI intelligence for every run — timing, test results, root cause analysis, and full build context.
 
 [![GitHub Marketplace](https://img.shields.io/badge/GitHub-Marketplace-blue?logo=github)](https://github.com/marketplace/actions/action-log-analyzer)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-Action Log Analyzer runs on **every workflow run** — whether jobs pass or fail. It posts a clear summary to your PR or Job Summary, extracts coverage reports and important links from logs, and surfaces artifacts.
+Action Log Analyzer runs on **every workflow run** — whether jobs pass or fail. It posts a clear, actionable summary to your PR or Job Summary with timing intelligence, test result extraction, and full build documentation.
 
-- **When jobs fail:** Root cause analysis, suggested fixes, error context, and step timeline
-- **When jobs pass:** Job status, artifacts, coverage reports, and links extracted from logs
+- **When jobs fail:** Root cause analysis, suggested fixes, error context, step timeline with slow step detection, test results, annotations, warnings, build parameters, cloned repos, actions/docker refs, artifact URLs
+- **When jobs pass:** Job durations, test results, annotations, step timeline with slow step detection, warnings, build parameters, cloned repos, actions/docker refs, artifact URLs
+- **Always:** Retry awareness, workflow context (trigger event, workflow name, run number)
 
 **No external API keys. No extra cost. Just add one job to your workflow.**
 
@@ -47,8 +48,8 @@ To run **only when jobs fail** (failure analysis only):
 
 | Scenario | What You Get |
 |:---------|:-------------|
-| **Jobs fail** | Root cause, failed step, suggested fix, error context, step timeline, artifacts, links |
-| **Jobs pass** | Job status, artifacts, coverage reports and links extracted from logs |
+| **Jobs fail** | Root cause, failed step, suggested fix, error context, step timeline with slow step flags, job duration, test results (failed test names), annotations, warnings, build parameters, cloned repositories with branches, actions & docker images used, artifact/registry URLs, retry indicator |
+| **Jobs pass** | Job durations with queue time, test results, annotations, step timeline with slow step flags, warnings, build parameters, cloned repositories with branches, actions & docker images used, artifact/registry URLs, workflow context |
 
 Output appears in the **PR comment** and **Job Summary** tab. For commits to `main` without a PR, the summary appears in the Job Summary only.
 
@@ -56,8 +57,14 @@ Output appears in the **PR comment** and **Job Summary** tab. For commits to `ma
 
 ## How It Works
 
-- **On failure:** Pattern matching (patterns.json) detects known errors and suggests fixes. When no pattern matches, it provides a generic fallback and suggests adding a custom pattern.
-- **On success:** Extracts coverage report URLs, test results, and other important links from job logs and surfaces them in the summary.
+- **On failure:** Pattern matching (patterns.json) detects known errors and suggests fixes. Patterns are matched by priority — higher-priority patterns win over generic ones. When no pattern matches, it provides a generic fallback and suggests adding a custom pattern.
+- **On success:** Extracts artifact URLs, registry links, and other important links from job logs and surfaces them in the summary.
+- **Timing intelligence:** Computes job and step durations from the GitHub API. Flags slow steps (over 5 minutes or consuming 60%+ of job time) with a turtle icon. Shows queue wait time when runners are contended.
+- **Test results:** Parses output from Jest, Vitest, pytest, Go test, JUnit, Mocha, RSpec, and PHPUnit. Shows pass/fail/skip counts and lists failed test names.
+- **Annotations:** Collects `##[error]`, `##[warning]`, and `##[notice]` annotations from logs and groups them by severity.
+- **Retry awareness:** Detects re-runs and shows the attempt number so you can distinguish flaky failures from real regressions.
+- **Workflow context:** Shows the trigger event (push, pull_request, schedule, etc.), workflow name, and run number.
+- **Both paths:** Captures warnings from logs, detects build parameters (env vars, action inputs, CLI flags), identifies cloned repositories with branches, and documents all GitHub Actions and Docker images used with their versions.
 
 ---
 
@@ -112,6 +119,15 @@ Use these in later steps to build custom notifications or integrations:
 | `suggestion` | Suggested fix |
 | `matched-pattern` | Pattern ID that matched, or `none` |
 | `category` | Category of the failure, or `Success` when all jobs pass |
+| `warning-count` | Number of warnings detected in job logs |
+| `build-params` | JSON array of detected build parameters `[{key, value, source}]` |
+| `git-refs` | JSON array of detected actions, docker images, and repos `[{repo, ref, type}]` |
+| `total-duration` | Total job duration as human-readable string (e.g. `2m 30s`) |
+| `slowest-step` | Name of the slowest step in the job |
+| `test-summary` | JSON object with test results `{framework, passed, failed, skipped, total, failedTests}` |
+| `run-attempt` | Current run attempt number (1 for first run, higher for retries) |
+| `run-number` | Workflow run number |
+| `trigger-event` | Event that triggered the workflow (`push`, `pull_request`, `schedule`, etc.) |
 
 ### Example — Use outputs in a Slack notification
 
@@ -125,6 +141,8 @@ Use these in later steps to build custom notifications or integrations:
   run: |
     echo "Root cause: ${{ steps.lens.outputs.root-cause }}"
     echo "Fix: ${{ steps.lens.outputs.suggestion }}"
+    echo "Duration: ${{ steps.lens.outputs.total-duration }}"
+    echo "Attempt: ${{ steps.lens.outputs.run-attempt }}"
 ```
 
 ---

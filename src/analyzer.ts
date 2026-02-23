@@ -41,6 +41,37 @@ export interface ClonedRepo {
   depth: string
 }
 
+export interface JobTiming {
+  jobName: string
+  jobDurationMs: number
+  queueTimeMs: number
+  steps: StepTiming[]
+  slowestStep: StepTiming | null
+}
+
+export interface StepTiming {
+  name: string
+  durationMs: number
+  conclusion: string | null
+  isSlow: boolean
+}
+
+export interface TestSummary {
+  framework: string
+  passed: number
+  failed: number
+  skipped: number
+  total: number
+  failedTests: string[]
+}
+
+export interface Annotation {
+  level: 'error' | 'warning' | 'notice'
+  message: string
+  file?: string
+  line?: number
+}
+
 interface ErrorPattern {
   id: string
   category: string
@@ -50,6 +81,7 @@ interface ErrorPattern {
   suggestion: string
   severity: 'critical' | 'warning' | 'info'
   tags: string[]
+  priority?: number
   docsUrl?: string
 }
 
@@ -397,6 +429,172 @@ export function extractGitRefsFromSteps(
   return refs
 }
 
+export function computeJobTiming(
+  job: {
+    name: string
+    started_at?: string | null
+    completed_at?: string | null
+    created_at?: string
+    steps?: { name: string; conclusion: string | null; started_at?: string | null; completed_at?: string | null }[]
+  }
+): JobTiming {
+  const jobStart = job.started_at ? new Date(job.started_at).getTime() : 0
+  const jobEnd = job.completed_at ? new Date(job.completed_at).getTime() : 0
+  const jobDurationMs = jobStart && jobEnd ? jobEnd - jobStart : 0
+
+  const jobCreated = job.created_at ? new Date(job.created_at).getTime() : 0
+  const queueTimeMs = jobCreated && jobStart ? Math.max(0, jobStart - jobCreated) : 0
+
+  const steps: StepTiming[] = (job.steps ?? []).map(s => {
+    const start = s.started_at ? new Date(s.started_at).getTime() : 0
+    const end = s.completed_at ? new Date(s.completed_at).getTime() : 0
+    const durationMs = start && end ? end - start : 0
+    const isSlow = durationMs > 300_000 || (jobDurationMs > 0 && durationMs / jobDurationMs > 0.6)
+    return { name: s.name, durationMs, conclusion: s.conclusion, isSlow }
+  })
+
+  const slowestStep = steps.length > 0
+    ? steps.reduce((max, s) => s.durationMs > max.durationMs ? s : max, steps[0])
+    : null
+
+  return { jobName: job.name, jobDurationMs, queueTimeMs, steps, slowestStep }
+}
+
+export function extractTestResults(lines: string[]): TestSummary | null {
+  let framework = ''
+  let passed = 0
+  let failed = 0
+  let skipped = 0
+  let total = 0
+  const failedTests: string[] = []
+  let detected = false
+
+  for (const raw of lines) {
+    const line = cleanLine(raw)
+    if (!line) continue
+
+    // Jest / Vitest: "FAIL src/foo.test.ts"
+    const jestFail = line.match(/^FAIL\s+(\S+\.(?:test|spec)\.\w+)/)
+    if (jestFail) { failedTests.push(jestFail[1]); framework = framework || 'Jest/Vitest' }
+
+    // Jest / Vitest summary: "Tests:  2 failed, 8 passed, 10 total"
+    const jestSummary = line.match(/Tests:\s+(?:(\d+)\s+failed,?\s*)?(?:(\d+)\s+skipped,?\s*)?(?:(\d+)\s+passed,?\s*)?(\d+)\s+total/)
+    if (jestSummary) {
+      framework = framework || 'Jest/Vitest'
+      failed = parseInt(jestSummary[1] || '0', 10)
+      skipped = parseInt(jestSummary[2] || '0', 10)
+      passed = parseInt(jestSummary[3] || '0', 10)
+      total = parseInt(jestSummary[4], 10)
+      detected = true
+    }
+
+    // pytest: "FAILED tests/test_foo.py::test_bar"
+    const pytestFail = line.match(/^FAILED\s+(\S+::\S+)/)
+    if (pytestFail) { failedTests.push(pytestFail[1]); framework = framework || 'pytest' }
+
+    // pytest summary: "2 failed, 8 passed, 1 skipped" or "= 2 failed, 8 passed ="
+    const pytestSummary = line.match(/=+\s*(?:(\d+)\s+failed)?[,\s]*(?:(\d+)\s+passed)?[,\s]*(?:(\d+)\s+skipped)?[,\s]*(?:(\d+)\s+error)?.*=+/)
+    if (pytestSummary && (pytestSummary[1] || pytestSummary[2])) {
+      framework = framework || 'pytest'
+      failed = parseInt(pytestSummary[1] || '0', 10)
+      passed = parseInt(pytestSummary[2] || '0', 10)
+      skipped = parseInt(pytestSummary[3] || '0', 10)
+      total = failed + passed + skipped + parseInt(pytestSummary[4] || '0', 10)
+      detected = true
+    }
+
+    // Go: "--- FAIL: TestFoo (0.01s)"
+    const goFail = line.match(/^---\s+FAIL:\s+(\S+)/)
+    if (goFail) { failedTests.push(goFail[1]); framework = framework || 'Go test' }
+
+    // Go summary: "FAIL	package/name	0.123s"
+    const goSummary = line.match(/^(ok|FAIL)\s+(\S+)\s+[\d.]+s/)
+    if (goSummary) { framework = framework || 'Go test' }
+
+    // Go count: "=== RUN" lines are tests
+    if (/^===\s+RUN\s+/.test(line)) { framework = framework || 'Go test' }
+
+    // JUnit-style: "Tests run: 10, Failures: 2, Errors: 1, Skipped: 0"
+    const junitSummary = line.match(/Tests\s+run:\s*(\d+),\s*Failures:\s*(\d+),\s*Errors:\s*(\d+)(?:,\s*Skipped:\s*(\d+))?/)
+    if (junitSummary) {
+      framework = framework || 'JUnit'
+      total = parseInt(junitSummary[1], 10)
+      failed = parseInt(junitSummary[2], 10) + parseInt(junitSummary[3], 10)
+      skipped = parseInt(junitSummary[4] || '0', 10)
+      passed = total - failed - skipped
+      detected = true
+    }
+
+    // Mocha: "5 passing (2s)" and "2 failing"
+    const mochaPassing = line.match(/(\d+)\s+passing/)
+    if (mochaPassing) { passed = parseInt(mochaPassing[1], 10); framework = framework || 'Mocha' }
+    const mochaFailing = line.match(/(\d+)\s+failing/)
+    if (mochaFailing && framework === 'Mocha') { failed = parseInt(mochaFailing[1], 10); detected = true }
+
+    // RSpec: "10 examples, 2 failures"
+    const rspecSummary = line.match(/(\d+)\s+examples?,\s+(\d+)\s+failures?(?:,\s+(\d+)\s+pending)?/)
+    if (rspecSummary) {
+      framework = 'RSpec'
+      total = parseInt(rspecSummary[1], 10)
+      failed = parseInt(rspecSummary[2], 10)
+      skipped = parseInt(rspecSummary[3] || '0', 10)
+      passed = total - failed - skipped
+      detected = true
+    }
+
+    // PHPUnit: "Tests: 10, Assertions: 20, Failures: 2"
+    const phpunitSummary = line.match(/Tests:\s*(\d+),\s*Assertions:\s*\d+(?:,\s*Failures:\s*(\d+))?(?:,\s*Errors:\s*(\d+))?/)
+    if (phpunitSummary) {
+      framework = 'PHPUnit'
+      total = parseInt(phpunitSummary[1], 10)
+      failed = parseInt(phpunitSummary[2] || '0', 10) + parseInt(phpunitSummary[3] || '0', 10)
+      passed = total - failed
+      detected = true
+    }
+  }
+
+  if (!detected && failedTests.length === 0) return null
+  if (!detected && failedTests.length > 0) {
+    failed = failedTests.length
+    total = failed
+  }
+
+  return { framework, passed, failed, skipped, total, failedTests: failedTests.slice(0, 15) }
+}
+
+export function extractAnnotations(lines: string[]): Annotation[] {
+  const annotations: Annotation[] = []
+  const seen = new Set<string>()
+
+  for (const raw of lines) {
+    // Match ##[error], ##[warning], ##[notice] before they get stripped
+    const annoMatch = raw.match(/##\[(error|warning|notice)\](.*)/)
+    if (!annoMatch) continue
+
+    const level = annoMatch[1] as Annotation['level']
+    let message = annoMatch[2].trim()
+    let file: string | undefined
+    let line: number | undefined
+
+    // Parse structured format: "##[error]file=path,line=N::message"
+    // or simpler "##[error]::message"
+    const structuredMatch = message.match(/^(?:file=([^,]+))?(?:,line=(\d+))?(?:,\w+=[^:]*)*::(.+)/)
+    if (structuredMatch) {
+      file = structuredMatch[1] || undefined
+      line = structuredMatch[2] ? parseInt(structuredMatch[2], 10) : undefined
+      message = structuredMatch[3]?.trim() || message
+    }
+
+    if (!message || message.length < 3) continue
+    const uid = `${level}:${message}`
+    if (seen.has(uid)) continue
+    seen.add(uid)
+    annotations.push({ level, message, file, line })
+  }
+
+  return annotations.slice(0, 30)
+}
+
 function extractFailedStep(lines: string[]): string | null {
   for (const line of lines) {
     const clean = cleanLine(line)
@@ -436,7 +634,8 @@ export async function analyzeLogs(
 
   const warningLinesByCategory = categorizeWarningLines(warningLines, patterns)
 
-  for (const p of patterns) {
+  const sorted = [...patterns].sort((a, b) => (a.priority ?? 50) - (b.priority ?? 50))
+  for (const p of sorted) {
     const regex = new RegExp(p.pattern, p.flags)
     for (const { cleaned, lineNumber } of cleanedLines) {
       if (cleaned.length === 0) continue

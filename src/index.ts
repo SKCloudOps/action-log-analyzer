@@ -1,7 +1,15 @@
 import * as core from '@actions/core'
 import * as github from '@actions/github'
-import { loadPatterns, analyzeLogs, extractBuildParams, extractGitRefsFromLogs, extractGitRefsFromSteps, extractClonedRepos, BuildParam, GitRef, ClonedRepo } from './analyzer'
+import { loadPatterns, analyzeLogs, extractBuildParams, extractGitRefsFromLogs, extractGitRefsFromSteps, extractClonedRepos, computeJobTiming, extractTestResults, extractAnnotations, BuildParam, GitRef, ClonedRepo, JobTiming, TestSummary, Annotation } from './analyzer'
 import { formatPRComment, formatJobSummary, formatSuccessSummary, formatSuccessPRComment } from './formatter'
+
+function formatDurationIndex(ms: number): string {
+  const sec = Math.round(ms / 1000)
+  if (sec < 60) return `${sec}s`
+  const m = Math.floor(sec / 60)
+  const s = sec % 60
+  return s > 0 ? `${m}m ${s}s` : `${m}m`
+}
 
 function cleanLogLine(raw: string): string {
   return raw
@@ -143,6 +151,15 @@ async function run(): Promise<void> {
     const triggeredBy = context.actor
     const repoFullName = `${owner}/${repo}`
 
+    const runAttempt = parseInt(process.env.GITHUB_RUN_ATTEMPT || '1', 10)
+    const runNumber = parseInt(process.env.GITHUB_RUN_NUMBER || '0', 10)
+    const triggerEvent = context.eventName || ''
+    const workflowName = process.env.GITHUB_WORKFLOW || ''
+
+    if (runAttempt > 1) {
+      core.info(`This is attempt #${runAttempt} of run #${runNumber}`)
+    }
+
     const { data: jobsData } = await octokit.rest.actions.listJobsForWorkflowRun({
       owner, repo, run_id: runId
     })
@@ -156,14 +173,17 @@ async function run(): Promise<void> {
     if (failedJobs.length === 0) {
       core.info('No failed jobs. Posting success summary.')
 
-      // Only show completed jobs (exclude in-progress e.g. analyze-logs itself)
       const completedJobs = jobsData.jobs.filter(j => j.conclusion != null)
+
+      const allTimings: JobTiming[] = completedJobs.map(j => computeJobTiming(j as any))
 
       let extractedLinks: { url: string; label?: string }[] = []
       let allWarnings: string[] = []
       let allBuildParams: BuildParam[] = []
       let allGitRefs: GitRef[] = []
       let allClonedRepos: ClonedRepo[] = []
+      let allTestSummary: TestSummary | null = null
+      let allAnnotations: Annotation[] = []
       const successfulJobs = jobsData.jobs.filter(j => j.conclusion === 'success')
       for (const job of successfulJobs.slice(0, 3)) {
         try {
@@ -178,6 +198,10 @@ async function run(): Promise<void> {
           allGitRefs = [...allGitRefs, ...extractGitRefsFromLogs(logLines)]
           allGitRefs = [...allGitRefs, ...extractGitRefsFromSteps(job.steps ?? [], logs)]
           allClonedRepos = [...allClonedRepos, ...extractClonedRepos(logLines)]
+          allAnnotations = [...allAnnotations, ...extractAnnotations(logLines)]
+          if (!allTestSummary) {
+            allTestSummary = extractTestResults(logLines)
+          }
           const seen = new Set<string>()
           extractedLinks = extractedLinks.filter(l => {
             if (seen.has(l.url)) return false
@@ -189,7 +213,6 @@ async function run(): Promise<void> {
         }
       }
 
-      // Deduplicate
       allWarnings = [...new Set(allWarnings)]
       const seenParams = new Set<string>()
       allBuildParams = allBuildParams.filter(p => {
@@ -211,6 +234,13 @@ async function run(): Promise<void> {
         seenCloned.add(r.repository)
         return true
       }).slice(0, 20)
+      const seenAnno = new Set<string>()
+      allAnnotations = allAnnotations.filter(a => {
+        const uid = `${a.level}:${a.message}`
+        if (seenAnno.has(uid)) return false
+        seenAnno.add(uid)
+        return true
+      }).slice(0, 30)
 
       const warningLinesByCategory = categorizeWarnings(allWarnings)
 
@@ -226,11 +256,19 @@ async function run(): Promise<void> {
       if (allClonedRepos.length > 0) {
         core.info(`Detected ${allClonedRepos.length} cloned repository(ies)`)
       }
+      if (allTestSummary) {
+        core.info(`Test results: ${allTestSummary.passed} passed, ${allTestSummary.failed} failed (${allTestSummary.framework})`)
+      }
+      if (allAnnotations.length > 0) {
+        core.info(`Collected ${allAnnotations.length} annotation(s)`)
+      }
+
+      const totalDurationMs = allTimings.reduce((sum, t) => sum + t.jobDurationMs, 0)
 
       if (postSummary) {
         const successSummary = formatSuccessSummary(
           runUrl,
-          completedJobs,
+          completedJobs as any,
           triggeredBy,
           branch,
           commit,
@@ -241,7 +279,14 @@ async function run(): Promise<void> {
           warningLinesByCategory,
           allBuildParams,
           allGitRefs,
-          allClonedRepos
+          allClonedRepos,
+          allTimings,
+          allTestSummary,
+          allAnnotations,
+          runAttempt,
+          runNumber,
+          triggerEvent,
+          workflowName
         )
         await core.summary.addRaw(successSummary).write()
         core.info('Success summary posted.')
@@ -250,7 +295,12 @@ async function run(): Promise<void> {
       if (postComment && context.payload.pull_request) {
         const prNumber = context.payload.pull_request.number
         const jobNames = completedJobs.map(j => j.name)
-        const comment = formatSuccessPRComment(jobNames, runUrl, artifacts, extractedLinks, allWarnings, warningLinesByCategory, allBuildParams, allGitRefs, allClonedRepos)
+        const comment = formatSuccessPRComment(
+          jobNames, runUrl, artifacts, extractedLinks,
+          allWarnings, warningLinesByCategory, allBuildParams, allGitRefs, allClonedRepos,
+          allTimings, allTestSummary, allAnnotations,
+          runAttempt, runNumber, triggerEvent, workflowName
+        )
 
         const { data: comments } = await octokit.rest.issues.listComments({
           owner, repo, issue_number: prNumber
@@ -282,6 +332,16 @@ async function run(): Promise<void> {
       core.setOutput('warning-count', String(allWarnings.length))
       core.setOutput('build-params', JSON.stringify(allBuildParams))
       core.setOutput('git-refs', JSON.stringify(allGitRefs))
+      core.setOutput('total-duration', totalDurationMs > 0 ? formatDurationIndex(totalDurationMs) : '')
+      const globalSlowest = allTimings.reduce<{ name: string; ms: number }>((best, t) => {
+        if (t.slowestStep && t.slowestStep.durationMs > best.ms) return { name: t.slowestStep.name, ms: t.slowestStep.durationMs }
+        return best
+      }, { name: '', ms: 0 })
+      core.setOutput('slowest-step', globalSlowest.name)
+      core.setOutput('test-summary', allTestSummary ? JSON.stringify(allTestSummary) : '')
+      core.setOutput('run-attempt', String(runAttempt))
+      core.setOutput('run-number', String(runNumber))
+      core.setOutput('trigger-event', triggerEvent)
       core.info('Action Log Analyzer complete.')
       return
     }
@@ -325,9 +385,22 @@ async function run(): Promise<void> {
       }).slice(0, 40)
       const jobClonedRepos = extractClonedRepos(logLines)
 
+      const jobTiming = computeJobTiming(job as any)
+      const jobTestSummary = extractTestResults(logLines)
+      const jobAnnotations = extractAnnotations(logLines)
+
       core.info(`Root cause: ${analysis.rootCause}`)
       core.info(`Category: ${analysis.category}`)
       core.info(`Matched pattern: ${analysis.matchedPattern}`)
+      if (jobTiming.jobDurationMs > 0) {
+        core.info(`Job duration: ${formatDurationIndex(jobTiming.jobDurationMs)}${jobTiming.slowestStep ? `, slowest step: ${jobTiming.slowestStep.name}` : ''}`)
+      }
+      if (jobTestSummary) {
+        core.info(`Test results: ${jobTestSummary.passed} passed, ${jobTestSummary.failed} failed (${jobTestSummary.framework})`)
+      }
+      if (jobAnnotations.length > 0) {
+        core.info(`Collected ${jobAnnotations.length} annotation(s)`)
+      }
       if (jobGitRefs.length > 0) {
         core.info(`Detected ${jobGitRefs.length} action/docker reference(s)`)
       }
@@ -343,24 +416,33 @@ async function run(): Promise<void> {
       core.setOutput('warning-count', String(analysis.warningLines.length))
       core.setOutput('build-params', JSON.stringify(analysis.buildParams))
       core.setOutput('git-refs', JSON.stringify(jobGitRefs))
+      core.setOutput('total-duration', jobTiming.jobDurationMs > 0 ? formatDurationIndex(jobTiming.jobDurationMs) : '')
+      core.setOutput('slowest-step', jobTiming.slowestStep?.name ?? '')
+      core.setOutput('test-summary', jobTestSummary ? JSON.stringify(jobTestSummary) : '')
+      core.setOutput('run-attempt', String(runAttempt))
+      core.setOutput('run-number', String(runNumber))
+      core.setOutput('trigger-event', triggerEvent)
 
       if (postSummary) {
         const summary = formatJobSummary(
           analysis, job.name, runUrl,
           job.steps ?? [], triggeredBy, branch, commit, repoFullName,
-          artifacts, extractedLinks, jobGitRefs, jobClonedRepos
+          artifacts, extractedLinks, jobGitRefs, jobClonedRepos,
+          jobTiming, jobTestSummary, jobAnnotations,
+          runAttempt, runNumber, triggerEvent, workflowName
         )
         await core.summary.addRaw(summary).write()
         core.info('Job summary posted.')
       }
 
-      // Post PR comment
       if (postComment && context.payload.pull_request) {
         const prNumber = context.payload.pull_request.number
         const comment = formatPRComment(
           analysis, job.name, runUrl,
           job.steps ?? [], repoFullName, branch, commit,
-          artifacts, extractedLinks, jobGitRefs, jobClonedRepos
+          artifacts, extractedLinks, jobGitRefs, jobClonedRepos,
+          jobTiming, jobTestSummary, jobAnnotations,
+          runAttempt, runNumber, triggerEvent, workflowName
         )
 
         const { data: comments } = await octokit.rest.issues.listComments({
