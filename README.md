@@ -1,4 +1,4 @@
-# 🔍 Action Log Analyzer
+# Action Log Analyzer
 
 > Instant CI/CD pipeline failure analysis — no more digging through 500 lines of logs.
 
@@ -11,7 +11,7 @@ Action Log Analyzer is a GitHub Action that automatically detects the root cause
 
 ---
 
-## 🚀 Quick Start
+## Quick Start
 
 Add this job to your existing workflow file:
 
@@ -34,7 +34,7 @@ That's it. `GITHUB_TOKEN` is **automatically available** in every GitHub Actions
 
 ---
 
-## 💬 What It Posts on Your PR
+## What It Posts on Your PR
 
 When a pipeline fails, Action Log Analyzer automatically comments on the PR with a structured analysis including root cause, failed step, suggested fix, and links to full logs.
 
@@ -42,13 +42,13 @@ For direct commits to `main` (no PR), the analysis appears in the **Job Summary*
 
 ---
 
-## 🔍 How Suggestions Are Generated
+## How Suggestions Are Generated
 
 Action Log Analyzer uses **pattern matching** (patterns.json) to detect known errors and suggest fixes. When no pattern matches, it provides a generic fallback suggesting you review the error lines and add a custom pattern for future runs.
 
 ---
 
-## 🔑 About GITHUB_TOKEN & Permissions
+## About GITHUB_TOKEN & Permissions
 
 `GITHUB_TOKEN` is a **short-lived token automatically created by GitHub** at the start of every workflow run. You do not need to create it, pay for it, or manage it.
 
@@ -61,7 +61,7 @@ You must explicitly grant the permissions Action Log Analyzer needs:
 
 ---
 
-## ✅ What It Detects
+## What It Detects
 
 | Category | Examples |
 |---|---|
@@ -76,19 +76,19 @@ You must explicitly grant the permissions Action Log Analyzer needs:
 
 ---
 
-## ⚙️ Inputs
+## Inputs
 
 | Input | Required | Default | Description |
 |---|---|---|---|
-| `github-token` | ✅ | `${{ github.token }}` | Auto-available, no setup needed |
-| `post-comment` | ❌ | `true` | Post analysis as PR comment |
-| `post-summary` | ❌ | `true` | Post analysis in Job Summary tab |
-| `failed-job-name` | ❌ | `` | Analyze a specific job only (analyzes all if not set) |
-| `remote-patterns-url` | ❌ | `` | URL to fetch additional community patterns from |
+| `github-token` | Yes | `${{ github.token }}` | Auto-available, no setup needed |
+| `post-comment` | No | `true` | Post analysis as PR comment |
+| `post-summary` | No | `true` | Post analysis in Job Summary tab |
+| `failed-job-name` | No | `` | Analyze a specific job only (analyzes all if not set) |
+| `remote-patterns-url` | No | `` | URL to fetch additional community patterns from |
 
 ---
 
-## 📤 Outputs
+## Outputs
 
 Use these in later steps to build custom notifications or integrations:
 
@@ -116,7 +116,7 @@ Use these in later steps to build custom notifications or integrations:
 
 ---
 
-## 📋 Adding Custom Patterns
+## Adding Custom Patterns
 
 Action Log Analyzer loads error patterns from `patterns.json` in the repo root. You can add your own patterns without touching any TypeScript:
 
@@ -137,7 +137,7 @@ Custom patterns are fast, free, and always take priority.
 
 ---
 
-## 🤝 Contributing
+## Contributing
 
 Contributions are welcome! The easiest way to contribute is to **add new error patterns** to `patterns.json` — no TypeScript knowledge needed, just JSON.
 
@@ -155,6 +155,6 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for full details.
 
 ---
 
-## 📄 License
+## License
 
 MIT

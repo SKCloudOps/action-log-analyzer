@@ -15,7 +15,7 @@ async function run(): Promise<void> {
     const context = github.context
     const { owner, repo } = context.repo
 
-    core.info('🔍 Action Log Analyzer: Starting failure analysis...')
+    core.info('Action Log Analyzer: Starting failure analysis...')
 
     // Load patterns — local + optional remote
     const patterns = await loadPatterns(remotePatternsUrl || undefined)
@@ -38,14 +38,14 @@ async function run(): Promise<void> {
     })
 
     if (failedJobs.length === 0) {
-      core.info('✅ No failed jobs found. Nothing to analyze.')
+      core.info('No failed jobs found. Nothing to analyze.')
       return
     }
 
     core.info(`Found ${failedJobs.length} failed job(s). Analyzing...`)
 
     for (const job of failedJobs) {
-      core.info(`📋 Analyzing job: ${job.name}`)
+      core.info(`Analyzing job: ${job.name}`)
 
       let logs = ''
       try {
@@ -66,9 +66,9 @@ async function run(): Promise<void> {
       // Analyze using pattern matching
       const analysis = await analyzeLogs(logs, patterns, failedStep)
 
-      core.info(`🔍 Root cause: ${analysis.rootCause}`)
-      core.info(`📦 Category: ${analysis.category}`)
-      core.info(`🎯 Matched pattern: ${analysis.matchedPattern}`)
+      core.info(`Root cause: ${analysis.rootCause}`)
+      core.info(`Category: ${analysis.category}`)
+      core.info(`Matched pattern: ${analysis.matchedPattern}`)
 
       // Set outputs
       core.setOutput('root-cause', analysis.rootCause)
@@ -84,7 +84,7 @@ async function run(): Promise<void> {
           job.steps ?? [], triggeredBy, branch, commit, repoFullName
         )
         await core.summary.addRaw(summary).write()
-        core.info('📊 Job summary posted.')
+        core.info('Job summary posted.')
       }
 
       // Post PR comment
@@ -105,17 +105,17 @@ async function run(): Promise<void> {
           await octokit.rest.issues.updateComment({
             owner, repo, comment_id: existingComment.id, body: comment
           })
-          core.info('💬 Updated existing PR comment.')
+          core.info('Updated existing PR comment.')
         } else {
           await octokit.rest.issues.createComment({
             owner, repo, issue_number: prNumber, body: comment
           })
-          core.info('💬 Posted PR comment.')
+          core.info('Posted PR comment.')
         }
       }
     }
 
-    core.info('✅ Action Log Analyzer analysis complete.')
+    core.info('Action Log Analyzer analysis complete.')
   } catch (error) {
     core.setFailed(`Action Log Analyzer failed: ${error instanceof Error ? error.message : String(error)}`)
   }

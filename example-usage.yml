@@ -46,7 +46,7 @@ jobs:
       issues: write        # Required to post PR comments
 
     steps:
-      - name: 🔍 Analyze pipeline failure
+      - name: Analyze pipeline failure
         uses: SKCloudOps/action-log-analyzer@v1
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}

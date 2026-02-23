@@ -78,8 +78,8 @@ jobs:
             \`\`\`
 
             ### What It Does
-            - 🔍 Pattern-based error detection for Docker, GitHub Actions, Node.js, Kubernetes
-            - 💬 Posts plain-English root cause and fix suggestion directly on your PR`,
+            - Pattern-based error detection for Docker, GitHub Actions, Node.js, Kubernetes
+            - Posts plain-English root cause and fix suggestion directly on your PR`,
               draft: false,
               prerelease: false
             })
