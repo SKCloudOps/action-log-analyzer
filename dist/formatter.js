@@ -2,18 +2,12 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.formatPRComment = formatPRComment;
 exports.formatJobSummary = formatJobSummary;
-const SEVERITY_EMOJI = {
-    critical: '🔴',
-    warning: '🟡',
-    info: '🔵'
-};
 const SEVERITY_LABEL = {
     critical: 'Critical',
     warning: 'Warning',
     info: 'Info'
 };
 function formatPRComment(analysis, jobName, runUrl) {
-    const emoji = SEVERITY_EMOJI[analysis.severity];
     const label = SEVERITY_LABEL[analysis.severity];
     const exactMatchBlock = analysis.exactMatchLine
         ? `\n#### Error Output
@@ -29,7 +23,7 @@ ${analysis.exactMatchLine}
 | | |
 |:--|:--|
 | **Job** | \`${jobName}\` |
-| **Severity** | ${emoji} ${label} |
+| **Severity** | ${label} |
 | **Logs** | [View full workflow run](${runUrl}) |
 
 > [!CAUTION]
@@ -47,15 +41,14 @@ ${errorBlock}
 *[Action Log Analyzer](https://github.com/SKCloudOps/action-log-analyzer) · [Report issue](https://github.com/SKCloudOps/action-log-analyzer/issues)*`;
 }
 function formatJobSummary(analysis, jobName, runUrl, steps, triggeredBy, branch, commit, repo) {
-    const emoji = SEVERITY_EMOJI[analysis.severity];
     const label = SEVERITY_LABEL[analysis.severity];
     const now = new Date().toUTCString();
     // Step breakdown
     const stepRows = steps.map(step => {
-        const icon = step.conclusion === 'success' ? '✅' :
-            step.conclusion === 'failure' ? '❌' :
-                step.conclusion === 'skipped' ? '⏭️' :
-                    step.conclusion === 'cancelled' ? '🚫' : '⏳';
+        const icon = step.conclusion === 'success' ? 'ok' :
+            step.conclusion === 'failure' ? 'fail' :
+                step.conclusion === 'skipped' ? 'skip' :
+                    step.conclusion === 'cancelled' ? 'cancel' : '--';
         const duration = step.started_at && step.completed_at
             ? `${Math.round((new Date(step.completed_at).getTime() - new Date(step.started_at).getTime()) / 1000)}s`
             : '—';
@@ -80,7 +73,7 @@ function formatJobSummary(analysis, jobName, runUrl, steps, triggeredBy, branch,
 | Commit | [\`${commit.substring(0, 7)}\`](https://github.com/${repo}/commit/${commit}) |
 | Triggered by | \`${triggeredBy}\` |
 | Job | \`${jobName}\` |
-| Severity | ${emoji} ${label} |
+| Severity | ${label} |
 | Log lines scanned | ${analysis.totalLines.toLocaleString()} |
 | Analyzed | ${now} |
 

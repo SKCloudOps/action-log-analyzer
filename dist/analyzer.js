@@ -52,32 +52,32 @@ function loadLocalPatterns() {
         if (fs.existsSync(localPath)) {
             const raw = fs.readFileSync(localPath, 'utf-8');
             const parsed = JSON.parse(raw);
-            core.info(`✅ Loaded ${parsed.patterns.length} patterns from patterns.json (v${parsed.version})`);
+            core.info(`Loaded ${parsed.patterns.length} patterns from patterns.json (v${parsed.version})`);
             return parsed.patterns;
         }
     }
     catch (err) {
-        core.warning(`⚠️ Could not load local patterns.json: ${err}`);
+        core.warning(`Could not load local patterns.json: ${err}`);
     }
     return [];
 }
 async function fetchRemotePatterns(remoteUrl) {
     try {
-        core.info(`🌐 Fetching remote patterns from ${remoteUrl}...`);
+        core.info(`Fetching remote patterns from ${remoteUrl}...`);
         const response = await fetch(remoteUrl, {
             headers: { 'Accept': 'application/json' },
             signal: AbortSignal.timeout(5000)
         });
         if (!response.ok) {
-            core.warning(`⚠️ Remote patterns fetch failed: HTTP ${response.status}`);
+            core.warning(`Remote patterns fetch failed: HTTP ${response.status}`);
             return [];
         }
         const parsed = await response.json();
-        core.info(`✅ Loaded ${parsed.patterns.length} remote patterns (v${parsed.version})`);
+        core.info(`Loaded ${parsed.patterns.length} remote patterns (v${parsed.version})`);
         return parsed.patterns;
     }
     catch (err) {
-        core.warning(`⚠️ Could not fetch remote patterns: ${err}`);
+        core.warning(`Could not fetch remote patterns: ${err}`);
         return [];
     }
 }
@@ -85,7 +85,7 @@ function mergePatterns(local, remote) {
     const localIds = new Set(local.map(p => p.id));
     const remoteOnly = remote.filter(p => !localIds.has(p.id));
     const merged = [...local, ...remoteOnly];
-    core.info(`📋 Using ${merged.length} total patterns (${local.length} local + ${remoteOnly.length} remote)`);
+    core.info(`Using ${merged.length} total patterns (${local.length} local + ${remoteOnly.length} remote)`);
     return merged;
 }
 async function loadPatterns(remoteUrl) {
@@ -120,7 +120,7 @@ async function analyzeLogs(logs, patterns, stepName) {
             errorLines.push(cleaned);
         }
     }
-    core.info(`📋 Scanned ${totalLines} log lines, found ${errorLines.length} error lines`);
+    core.info(`Scanned ${totalLines} log lines, found ${errorLines.length} error lines`);
     // Tier 1 — pattern matching on cleaned lines
     for (const p of patterns) {
         const regex = new RegExp(p.pattern, p.flags);
@@ -128,7 +128,7 @@ async function analyzeLogs(logs, patterns, stepName) {
             if (cleaned.length === 0)
                 continue;
             if (regex.test(cleaned)) {
-                core.info(`✅ Matched pattern: ${p.id} (${p.category}) at line ${lineNumber}`);
+                core.info(`Matched pattern: ${p.id} (${p.category}) at line ${lineNumber}`);
                 return {
                     rootCause: p.rootCause,
                     failedStep: stepName || extractFailedStep(rawLines) || 'Unknown step',

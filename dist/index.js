@@ -29980,32 +29980,32 @@ function loadLocalPatterns() {
         if (fs.existsSync(localPath)) {
             const raw = fs.readFileSync(localPath, 'utf-8');
             const parsed = JSON.parse(raw);
-            core.info(`✅ Loaded ${parsed.patterns.length} patterns from patterns.json (v${parsed.version})`);
+            core.info(`Loaded ${parsed.patterns.length} patterns from patterns.json (v${parsed.version})`);
             return parsed.patterns;
         }
     }
     catch (err) {
-        core.warning(`⚠️ Could not load local patterns.json: ${err}`);
+        core.warning(`Could not load local patterns.json: ${err}`);
     }
     return [];
 }
 async function fetchRemotePatterns(remoteUrl) {
     try {
-        core.info(`🌐 Fetching remote patterns from ${remoteUrl}...`);
+        core.info(`Fetching remote patterns from ${remoteUrl}...`);
         const response = await fetch(remoteUrl, {
             headers: { 'Accept': 'application/json' },
             signal: AbortSignal.timeout(5000)
         });
         if (!response.ok) {
-            core.warning(`⚠️ Remote patterns fetch failed: HTTP ${response.status}`);
+            core.warning(`Remote patterns fetch failed: HTTP ${response.status}`);
             return [];
         }
         const parsed = await response.json();
-        core.info(`✅ Loaded ${parsed.patterns.length} remote patterns (v${parsed.version})`);
+        core.info(`Loaded ${parsed.patterns.length} remote patterns (v${parsed.version})`);
         return parsed.patterns;
     }
     catch (err) {
-        core.warning(`⚠️ Could not fetch remote patterns: ${err}`);
+        core.warning(`Could not fetch remote patterns: ${err}`);
         return [];
     }
 }
@@ -30013,7 +30013,7 @@ function mergePatterns(local, remote) {
     const localIds = new Set(local.map(p => p.id));
     const remoteOnly = remote.filter(p => !localIds.has(p.id));
     const merged = [...local, ...remoteOnly];
-    core.info(`📋 Using ${merged.length} total patterns (${local.length} local + ${remoteOnly.length} remote)`);
+    core.info(`Using ${merged.length} total patterns (${local.length} local + ${remoteOnly.length} remote)`);
     return merged;
 }
 async function loadPatterns(remoteUrl) {
@@ -30048,7 +30048,7 @@ async function analyzeLogs(logs, patterns, stepName) {
             errorLines.push(cleaned);
         }
     }
-    core.info(`📋 Scanned ${totalLines} log lines, found ${errorLines.length} error lines`);
+    core.info(`Scanned ${totalLines} log lines, found ${errorLines.length} error lines`);
     // Tier 1 — pattern matching on cleaned lines
     for (const p of patterns) {
         const regex = new RegExp(p.pattern, p.flags);
@@ -30056,7 +30056,7 @@ async function analyzeLogs(logs, patterns, stepName) {
             if (cleaned.length === 0)
                 continue;
             if (regex.test(cleaned)) {
-                core.info(`✅ Matched pattern: ${p.id} (${p.category}) at line ${lineNumber}`);
+                core.info(`Matched pattern: ${p.id} (${p.category}) at line ${lineNumber}`);
                 return {
                     rootCause: p.rootCause,
                     failedStep: stepName || extractFailedStep(rawLines) || 'Unknown step',
@@ -30098,18 +30098,12 @@ async function analyzeLogs(logs, patterns, stepName) {
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.formatPRComment = formatPRComment;
 exports.formatJobSummary = formatJobSummary;
-const SEVERITY_EMOJI = {
-    critical: '🔴',
-    warning: '🟡',
-    info: '🔵'
-};
 const SEVERITY_LABEL = {
     critical: 'Critical',
     warning: 'Warning',
     info: 'Info'
 };
 function formatPRComment(analysis, jobName, runUrl) {
-    const emoji = SEVERITY_EMOJI[analysis.severity];
     const label = SEVERITY_LABEL[analysis.severity];
     const exactMatchBlock = analysis.exactMatchLine
         ? `\n#### Error Output
@@ -30125,7 +30119,7 @@ ${analysis.exactMatchLine}
 | | |
 |:--|:--|
 | **Job** | \`${jobName}\` |
-| **Severity** | ${emoji} ${label} |
+| **Severity** | ${label} |
 | **Logs** | [View full workflow run](${runUrl}) |
 
 > [!CAUTION]
@@ -30143,15 +30137,14 @@ ${errorBlock}
 *[Action Log Analyzer](https://github.com/SKCloudOps/action-log-analyzer) · [Report issue](https://github.com/SKCloudOps/action-log-analyzer/issues)*`;
 }
 function formatJobSummary(analysis, jobName, runUrl, steps, triggeredBy, branch, commit, repo) {
-    const emoji = SEVERITY_EMOJI[analysis.severity];
     const label = SEVERITY_LABEL[analysis.severity];
     const now = new Date().toUTCString();
     // Step breakdown
     const stepRows = steps.map(step => {
-        const icon = step.conclusion === 'success' ? '✅' :
-            step.conclusion === 'failure' ? '❌' :
-                step.conclusion === 'skipped' ? '⏭️' :
-                    step.conclusion === 'cancelled' ? '🚫' : '⏳';
+        const icon = step.conclusion === 'success' ? 'ok' :
+            step.conclusion === 'failure' ? 'fail' :
+                step.conclusion === 'skipped' ? 'skip' :
+                    step.conclusion === 'cancelled' ? 'cancel' : '--';
         const duration = step.started_at && step.completed_at
             ? `${Math.round((new Date(step.completed_at).getTime() - new Date(step.started_at).getTime()) / 1000)}s`
             : '—';
@@ -30176,7 +30169,7 @@ function formatJobSummary(analysis, jobName, runUrl, steps, triggeredBy, branch,
 | Commit | [\`${commit.substring(0, 7)}\`](https://github.com/${repo}/commit/${commit}) |
 | Triggered by | \`${triggeredBy}\` |
 | Job | \`${jobName}\` |
-| Severity | ${emoji} ${label} |
+| Severity | ${label} |
 | Log lines scanned | ${analysis.totalLines.toLocaleString()} |
 | Analyzed | ${now} |
 
@@ -30289,7 +30282,7 @@ async function run() {
         const octokit = github.getOctokit(token);
         const context = github.context;
         const { owner, repo } = context.repo;
-        core.info('🔍 Action Log Analyzer: Starting failure analysis...');
+        core.info('Action Log Analyzer: Starting failure analysis...');
         // Load patterns — local + optional remote
         const patterns = await (0, analyzer_1.loadPatterns)(remotePatternsUrl || undefined);
         const runId = context.runId;
@@ -30308,12 +30301,12 @@ async function run() {
             return isFailed;
         });
         if (failedJobs.length === 0) {
-            core.info('✅ No failed jobs found. Nothing to analyze.');
+            core.info('No failed jobs found. Nothing to analyze.');
             return;
         }
         core.info(`Found ${failedJobs.length} failed job(s). Analyzing...`);
         for (const job of failedJobs) {
-            core.info(`📋 Analyzing job: ${job.name}`);
+            core.info(`Analyzing job: ${job.name}`);
             let logs = '';
             try {
                 const logsResponse = await octokit.rest.actions.downloadJobLogsForWorkflowRun({
@@ -30331,9 +30324,9 @@ async function run() {
             const failedStep = job.steps?.find(s => s.conclusion === 'failure')?.name;
             // Analyze using pattern matching
             const analysis = await (0, analyzer_1.analyzeLogs)(logs, patterns, failedStep);
-            core.info(`🔍 Root cause: ${analysis.rootCause}`);
-            core.info(`📦 Category: ${analysis.category}`);
-            core.info(`🎯 Matched pattern: ${analysis.matchedPattern}`);
+            core.info(`Root cause: ${analysis.rootCause}`);
+            core.info(`Category: ${analysis.category}`);
+            core.info(`Matched pattern: ${analysis.matchedPattern}`);
             // Set outputs
             core.setOutput('root-cause', analysis.rootCause);
             core.setOutput('failed-step', analysis.failedStep);
@@ -30344,7 +30337,7 @@ async function run() {
             if (postSummary) {
                 const summary = (0, formatter_1.formatJobSummary)(analysis, job.name, runUrl, job.steps ?? [], triggeredBy, branch, commit, repoFullName);
                 await core.summary.addRaw(summary).write();
-                core.info('📊 Job summary posted.');
+                core.info('Job summary posted.');
             }
             // Post PR comment
             if (postComment && context.payload.pull_request) {
@@ -30359,17 +30352,17 @@ async function run() {
                     await octokit.rest.issues.updateComment({
                         owner, repo, comment_id: existingComment.id, body: comment
                     });
-                    core.info('💬 Updated existing PR comment.');
+                    core.info('Updated existing PR comment.');
                 }
                 else {
                     await octokit.rest.issues.createComment({
                         owner, repo, issue_number: prNumber, body: comment
                     });
-                    core.info('💬 Posted PR comment.');
+                    core.info('Posted PR comment.');
                 }
             }
         }
-        core.info('✅ Action Log Analyzer analysis complete.');
+        core.info('Action Log Analyzer analysis complete.');
     }
     catch (error) {
         core.setFailed(`Action Log Analyzer failed: ${error instanceof Error ? error.message : String(error)}`);
