@@ -97,7 +97,7 @@ async function run(): Promise<void> {
         })
 
         const existingComment = comments.find(c =>
-          c.body?.includes('Pipeline Failure Analysis') &&
+          c.body?.includes('Log Analyzer Report') &&
           c.body?.includes(job.name)
         )
 
