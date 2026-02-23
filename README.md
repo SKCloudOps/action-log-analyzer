@@ -36,23 +36,7 @@ That's it. `GITHUB_TOKEN` is **automatically available** in every GitHub Actions
 
 ## 💬 What It Posts on Your PR
 
-When a pipeline fails, Action Log Analyzer automatically comments on the PR:
-
-```
-🔴 Action Log Analyzer — Failure Analysis
-
-Job: `build` · Severity: Critical
-
-🔍 Root Cause
-Docker registry authentication failed
-
-📍 Failed Step
-`Build and push image`
-
-💡 Suggested Fix
-Check your DOCKER_USERNAME and DOCKER_PASSWORD secrets are set
-correctly in repository settings (Settings → Secrets → Actions)
-```
+When a pipeline fails, Action Log Analyzer automatically comments on the PR with a structured analysis including root cause, failed step, suggested fix, and links to full logs.
 
 For direct commits to `main` (no PR), the analysis appears in the **Job Summary** tab of the workflow run instead.
 
