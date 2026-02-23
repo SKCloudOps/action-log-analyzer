@@ -490,25 +490,6 @@ export function formatSuccessSummary(
 ${stepRows}`
   }
 
-  const coverageLinks = extractedLinks.filter(l => l.label === 'Coverage report')
-  const reportLinks = extractedLinks.filter(l => l.label && l.label !== 'Coverage report')
-  let coverageSection = ''
-  if (coverageLinks.length > 0 || reportLinks.length > 0) {
-    const parts: string[] = []
-    if (coverageLinks.length > 0) {
-      parts.push(`| Coverage | ${coverageLinks.map(l => `[${l.label}](${l.url})`).join(' · ')} |`)
-    }
-    if (reportLinks.length > 0) {
-      parts.push(`| Reports | ${reportLinks.slice(0, 5).map(l => `[${l.label}](${l.url})`).join(' · ')} |`)
-    }
-    coverageSection = `
-
-### Coverage & Reports
-| Type | Link |
-|:-----|:-----|
-${parts.join('\n')}`
-  }
-
   return `# Log Analyzer Report
 
 ## All Jobs Passed
@@ -530,7 +511,6 @@ ${jobRows}
 | Jobs passed | ${jobs.length} |
 | Steps completed | ${passedSteps}/${totalSteps} |
 ${timelineSection}
-${coverageSection}
 
 ${warningLines.length > 0 ? `### Warnings (${warningLines.length})
 ${buildWarningsSection(warningLines, warningLinesByCategory, 10)}
@@ -570,18 +550,11 @@ export function formatSuccessPRComment(
       parts.push(`**Artifacts:** ${artifacts.map(a => `\`${a.name}\` (${Math.round(a.size_in_bytes / 1024)} KB)`).join(', ')}`)
     }
     if (extractedLinks.length > 0) {
-      const coverage = extractedLinks.filter(l => l.label === 'Coverage report')
-      if (coverage.length > 0) {
-        parts.push(`**Coverage:** ${coverage.map(l => `[${l.label}](${l.url})`).join(', ')}`)
-      }
-      const other = extractedLinks.filter(l => !l.label || l.label !== 'Coverage report')
-      if (other.length > 0) {
-        parts.push(`**Links:** ${other.slice(0, 5).map(l => {
-          let display = l.label || ''
-          if (!display) { try { display = new URL(l.url).hostname.replace(/^www\./, '') } catch { display = 'Link' } }
-          return `[${display}](${l.url})`
-        }).join(', ')}`)
-      }
+      parts.push(`**Links:** ${extractedLinks.slice(0, 5).map(l => {
+        let display = l.label || ''
+        if (!display) { try { display = new URL(l.url).hostname.replace(/^www\./, '') } catch { display = 'Link' } }
+        return `[${display}](${l.url})`
+      }).join(', ')}`)
     }
     extra = `\n\n${parts.join('\n\n')}\n\n[View workflow run & download](${runUrl})`
   }
