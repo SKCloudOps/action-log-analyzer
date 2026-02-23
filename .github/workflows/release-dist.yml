@@ -79,7 +79,6 @@ jobs:
 
             ### What It Does
             - 🔍 Pattern-based error detection for Docker, GitHub Actions, Node.js, Kubernetes
-            - 🤖 AI-powered fallback via GitHub Models — no extra API key needed
             - 💬 Posts plain-English root cause and fix suggestion directly on your PR`,
               draft: false,
               prerelease: false

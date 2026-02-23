@@ -23,7 +23,6 @@ analyze-failure:
   permissions:
     actions: read           # read workflow logs
     pull-requests: write    # post PR comment
-    models: read            # GitHub Models AI (for unknown errors)
 
   steps:
     - uses: SKCloudOps/action-log-analyzer@v1
@@ -59,24 +58,9 @@ For direct commits to `main` (no PR), the analysis appears in the **Job Summary*
 
 ---
 
-## 🧠 How Suggestions Are Generated
+## 🔍 How Suggestions Are Generated
 
-Action Log Analyzer uses a **3-tier system** to generate fix suggestions:
-
-```
-Tier 1 — Pattern matching (patterns.json)
-  Fast, free, works offline. Matches known errors instantly.
-  ↓ no match found
-
-Tier 2 — GitHub Models AI (gpt-4o-mini)
-  Uses your GITHUB_TOKEN — no extra API key needed.
-  Analyzes the actual log lines and generates a contextual suggestion.
-  ↓ AI unavailable or disabled
-
-Tier 3 — Generic fallback
-  Tells you to review the error lines and suggests adding a
-  custom pattern to patterns.json for future runs.
-```
+Action Log Analyzer uses **pattern matching** (patterns.json) to detect known errors and suggest fixes. When no pattern matches, it provides a generic fallback suggesting you review the error lines and add a custom pattern for future runs.
 
 ---
 
@@ -84,17 +68,12 @@ Tier 3 — Generic fallback
 
 `GITHUB_TOKEN` is a **short-lived token automatically created by GitHub** at the start of every workflow run. You do not need to create it, pay for it, or manage it.
 
-However, you must explicitly grant the permissions Action Log Analyzer needs:
+You must explicitly grant the permissions Action Log Analyzer needs:
 
 | Permission | Why It's Needed |
 |---|---|
 | `actions: read` | Fetch the failed job's logs |
 | `pull-requests: write` | Post the analysis comment on the PR |
-| `models: read` | Call GitHub Models AI for unknown errors |
-
-Without `models: read`, the AI fallback is automatically skipped and Action Log Analyzer falls back to pattern matching only — the action still works fine.
-
-You can disable AI entirely with `enable-ai: false` if preferred.
 
 ---
 
@@ -109,7 +88,7 @@ You can disable AI entirely with `enable-ai: false` if preferred.
 | **TypeScript** | Compilation errors |
 | **Network** | Connection refused, API rate limits |
 | **Kubernetes** | ImagePullBackOff, Helm failures |
-| **Unknown** | AI-powered analysis via GitHub Models |
+| **Unknown** | Generic fallback with error line review |
 
 ---
 
@@ -122,7 +101,6 @@ You can disable AI entirely with `enable-ai: false` if preferred.
 | `post-summary` | ❌ | `true` | Post analysis in Job Summary tab |
 | `failed-job-name` | ❌ | `` | Analyze a specific job only (analyzes all if not set) |
 | `remote-patterns-url` | ❌ | `` | URL to fetch additional community patterns from |
-| `enable-ai` | ❌ | `true` | Use GitHub Models AI as fallback for unknown errors |
 
 ---
 
@@ -135,9 +113,8 @@ Use these in later steps to build custom notifications or integrations:
 | `root-cause` | Plain-English root cause |
 | `failed-step` | The step that caused the failure |
 | `suggestion` | Suggested fix |
-| `matched-pattern` | Pattern ID that matched (or `ai-generated` / `none`) |
+| `matched-pattern` | Pattern ID that matched (or `none`) |
 | `category` | Category of the failure (Docker, Node.js, etc.) |
-| `ai-generated` | `true` if the suggestion was AI-generated |
 
 ### Example — Use outputs in a Slack notification
 
@@ -172,7 +149,7 @@ Action Log Analyzer loads error patterns from `patterns.json` in the repo root. 
 }
 ```
 
-Custom patterns are matched **before** AI is called — so they're fast, free, and always take priority.
+Custom patterns are fast, free, and always take priority.
 
 ---
 

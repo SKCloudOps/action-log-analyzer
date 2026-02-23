@@ -1,5 +1,5 @@
 name: 'Action Log Analyzer'
-description: 'AI that zooms into your failure logs and tells you exactly what broke'
+description: 'Pattern-based failure log analysis — zooms into your failure logs and tells you exactly what broke'
 author: 'Sathish'
 
 branding:
@@ -8,7 +8,7 @@ branding:
 
 inputs:
   github-token:
-    description: 'GitHub token for posting PR comments and GitHub Models AI'
+    description: 'GitHub token for posting PR comments'
     required: true
     default: ${{ github.token }}
   post-comment:
@@ -27,10 +27,6 @@ inputs:
     description: 'URL to fetch additional community patterns from'
     required: false
     default: ''
-  enable-ai:
-    description: 'Use GitHub Models AI as fallback when no pattern matches (uses your GITHUB_TOKEN — no extra API key needed)'
-    required: false
-    default: 'true'
 
 outputs:
   root-cause:
@@ -40,11 +36,9 @@ outputs:
   suggestion:
     description: 'Suggested fix for the failure'
   matched-pattern:
-    description: 'ID of the pattern that matched (or ai-generated / none)'
+    description: 'ID of the pattern that matched (or none)'
   category:
     description: 'Category of the failure'
-  ai-generated:
-    description: 'Whether the suggestion was AI-generated (true/false)'
 
 runs:
   using: 'node20'

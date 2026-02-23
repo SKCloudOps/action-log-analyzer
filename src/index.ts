@@ -10,14 +10,12 @@ async function run(): Promise<void> {
     const postSummary = core.getInput('post-summary') === 'true'
     const failedJobName = core.getInput('failed-job-name')
     const remotePatternsUrl = core.getInput('remote-patterns-url')
-    const enableAI = core.getInput('enable-ai') === 'true'
 
     const octokit = github.getOctokit(token)
     const context = github.context
     const { owner, repo } = context.repo
 
     core.info('🔍 Action Log Analyzer: Starting failure analysis...')
-    core.info(`🤖 AI fallback: ${enableAI ? 'enabled (GitHub Models)' : 'disabled'}`)
 
     // Load patterns — local + optional remote
     const patterns = await loadPatterns(remotePatternsUrl || undefined)
@@ -65,13 +63,12 @@ async function run(): Promise<void> {
 
       const failedStep = job.steps?.find(s => s.conclusion === 'failure')?.name
 
-      // Analyze — pattern match first, AI fallback if enabled and no match
-      const analysis = await analyzeLogs(logs, patterns, token, enableAI, failedStep)
+      // Analyze using pattern matching
+      const analysis = await analyzeLogs(logs, patterns, failedStep)
 
       core.info(`🔍 Root cause: ${analysis.rootCause}`)
       core.info(`📦 Category: ${analysis.category}`)
       core.info(`🎯 Matched pattern: ${analysis.matchedPattern}`)
-      core.info(`🤖 AI generated: ${analysis.aiGenerated}`)
 
       // Set outputs
       core.setOutput('root-cause', analysis.rootCause)
@@ -79,7 +76,6 @@ async function run(): Promise<void> {
       core.setOutput('suggestion', analysis.suggestion)
       core.setOutput('matched-pattern', analysis.matchedPattern)
       core.setOutput('category', analysis.category)
-      core.setOutput('ai-generated', String(analysis.aiGenerated))
 
       // Post job summary
       if (postSummary) {
@@ -101,7 +97,7 @@ async function run(): Promise<void> {
         })
 
         const existingComment = comments.find(c =>
-          c.body?.includes('Action Log Analyzer — Failure Analysis') &&
+          c.body?.includes('Pipeline Failure Analysis') &&
           c.body?.includes(job.name)
         )
 

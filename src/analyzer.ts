@@ -1,7 +1,6 @@
 import * as fs from 'fs'
 import * as path from 'path'
 import * as core from '@actions/core'
-import { getAISuggestion } from './ai'
 
 export interface FailureAnalysis {
   rootCause: string
@@ -14,7 +13,6 @@ export interface FailureAnalysis {
   severity: 'critical' | 'warning' | 'info'
   matchedPattern: string
   category: string
-  aiGenerated: boolean
 }
 
 interface ErrorPattern {
@@ -106,8 +104,6 @@ function extractFailedStep(lines: string[]): string | null {
 export async function analyzeLogs(
   logs: string,
   patterns: ErrorPattern[],
-  token: string,
-  useAI: boolean,
   stepName?: string
 ): Promise<FailureAnalysis> {
   const rawLines = logs.split('\n')
@@ -146,36 +142,13 @@ export async function analyzeLogs(
           totalLines,
           severity: p.severity,
           matchedPattern: p.id,
-          category: p.category,
-          aiGenerated: false
+          category: p.category
         }
       }
     }
   }
 
-  // Tier 2 — GitHub Models AI fallback
-  if (useAI && errorLines.length > 0) {
-    core.info('⚠️ No pattern matched — trying GitHub Models AI fallback...')
-    const aiResult = await getAISuggestion(errorLines, token)
-
-    if (aiResult) {
-      return {
-        rootCause: aiResult.rootCause,
-        failedStep: stepName || extractFailedStep(rawLines) || 'Unknown step',
-        suggestion: `${aiResult.suggestion} *(AI-generated, confidence: ${aiResult.confidence})*`,
-        errorLines,
-        exactMatchLine: errorLines[0] || '',
-        exactMatchLineNumber: 0,
-        totalLines,
-        severity: 'warning',
-        matchedPattern: 'ai-generated',
-        category: 'AI Analysis',
-        aiGenerated: true
-      }
-    }
-  }
-
-  // Tier 3 — generic fallback
+  // No pattern matched — generic fallback
   return {
     rootCause: 'Unknown failure — could not automatically detect root cause',
     failedStep: stepName || extractFailedStep(rawLines) || 'Unknown step',
@@ -186,7 +159,6 @@ export async function analyzeLogs(
     totalLines,
     severity: 'warning',
     matchedPattern: 'none',
-    category: 'Unknown',
-    aiGenerated: false
+    category: 'Unknown'
   }
 }
