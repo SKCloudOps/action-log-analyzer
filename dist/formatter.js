@@ -177,6 +177,93 @@ function buildActionsAndImagesTable(refs) {
 |:-----|:-------------------|:----------|
 ${rows.join('\n')}`;
 }
+function buildTimingSection(timing) {
+    if (timing.jobDurationMs === 0)
+        return '';
+    const parts = [];
+    parts.push(`| Metric | Value |`);
+    parts.push(`|:-------|:------|`);
+    parts.push(`| Total duration | **${formatDuration(timing.jobDurationMs)}** |`);
+    if (timing.queueTimeMs > 30000) {
+        parts.push(`| Queue wait | ${formatDuration(timing.queueTimeMs)} |`);
+    }
+    if (timing.slowestStep) {
+        const pct = timing.jobDurationMs > 0
+            ? ` (${Math.round(timing.slowestStep.durationMs / timing.jobDurationMs * 100)}%)`
+            : '';
+        parts.push(`| Slowest step | \`${timing.slowestStep.name}\` — ${formatDuration(timing.slowestStep.durationMs)}${pct} |`);
+    }
+    const slowSteps = timing.steps.filter(s => s.isSlow && s.name !== timing.slowestStep?.name);
+    if (slowSteps.length > 0) {
+        const names = slowSteps.map(s => `\`${s.name}\` (${formatDuration(s.durationMs)})`).join(', ');
+        parts.push(`| Other slow steps | ${names} |`);
+    }
+    return parts.join('\n');
+}
+function buildTestResultsSection(testSummary) {
+    const parts = [];
+    const statusIcon = testSummary.failed > 0 ? '❌' : '✅';
+    parts.push(`| Framework | Passed | Failed | Skipped | Total | Status |`);
+    parts.push(`|:----------|-------:|-------:|--------:|------:|:------:|`);
+    parts.push(`| ${testSummary.framework || 'Unknown'} | ${testSummary.passed} | ${testSummary.failed} | ${testSummary.skipped} | ${testSummary.total} | ${statusIcon} |`);
+    if (testSummary.failedTests.length > 0) {
+        parts.push('');
+        parts.push('<details>');
+        parts.push(`<summary>Failed tests (${testSummary.failedTests.length})</summary>`);
+        parts.push('');
+        parts.push('```text');
+        parts.push(testSummary.failedTests.join('\n'));
+        parts.push('```');
+        parts.push('</details>');
+    }
+    return parts.join('\n');
+}
+function buildAnnotationsSection(annotations) {
+    if (annotations.length === 0)
+        return '';
+    const grouped = {};
+    for (const a of annotations) {
+        const key = a.level;
+        if (!grouped[key])
+            grouped[key] = [];
+        grouped[key].push(a);
+    }
+    const levelOrder = ['error', 'warning', 'notice'];
+    const levelIcons = { error: '🔴', warning: '🟡', notice: '🔵' };
+    const parts = [];
+    for (const level of levelOrder) {
+        const items = grouped[level];
+        if (!items || items.length === 0)
+            continue;
+        parts.push(`<details>`);
+        parts.push(`<summary>${levelIcons[level]} ${level.charAt(0).toUpperCase() + level.slice(1)} (${items.length})</summary>`);
+        parts.push('');
+        parts.push('```text');
+        for (const a of items.slice(0, 10)) {
+            const loc = a.file ? ` [${a.file}${a.line ? `:${a.line}` : ''}]` : '';
+            parts.push(`${a.message}${loc}`);
+        }
+        if (items.length > 10)
+            parts.push(`... ${items.length - 10} more`);
+        parts.push('```');
+        parts.push('</details>');
+    }
+    return parts.join('\n');
+}
+function buildRunMeta(runAttempt, runNumber, triggerEvent, workflowName) {
+    const parts = [];
+    if (workflowName)
+        parts.push(`**${workflowName}**`);
+    if (triggerEvent)
+        parts.push(`\`${triggerEvent}\``);
+    if (runNumber > 0) {
+        let runLabel = `Run #${runNumber}`;
+        if (runAttempt > 1)
+            runLabel += ` · Attempt #${runAttempt} 🔄`;
+        parts.push(runLabel);
+    }
+    return parts.length > 0 ? parts.join(' · ') : '';
+}
 function formatBytes(bytes) {
     if (bytes < 1024)
         return `${bytes} B`;
@@ -211,28 +298,32 @@ function buildArtifactsAndLinksSection(runUrl, artifacts, extractedLinks, repo) 
     }
     return parts.join('\n');
 }
-function formatPRComment(analysis, jobName, runUrl, steps, repo, branch, commit, artifacts = [], extractedLinks = [], gitRefs = [], clonedRepos = []) {
+function formatPRComment(analysis, jobName, runUrl, steps, repo, branch, commit, artifacts = [], extractedLinks = [], gitRefs = [], clonedRepos = [], timing = null, testSummary = null, annotations = [], runAttempt = 1, runNumber = 0, triggerEvent = '', workflowName = '') {
     const passedCount = steps.filter(s => s.conclusion === 'success').length;
     const totalCount = steps.length;
     const stepBar = steps.map(s => s.conclusion === 'success' ? '🟢' :
         s.conclusion === 'failure' ? '🔴' :
             s.conclusion === 'skipped' ? '⏭️' : '🟡').join('');
     const failedIdx = steps.findIndex(s => s.conclusion === 'failure');
+    const slowStepNames = new Set(timing?.steps.filter(s => s.isSlow).map(s => s.name) ?? []);
     const commandRows = steps.map((step, i) => {
         const icon = step.conclusion === 'success' ? '✅' : step.conclusion === 'failure' ? '❌' : '⏳';
         const duration = step.started_at && step.completed_at
             ? formatDuration(new Date(step.completed_at).getTime() - new Date(step.started_at).getTime())
             : '—';
+        const slowFlag = slowStepNames.has(step.name) ? ' 🐢' : '';
         const failedMarker = i === failedIdx ? '\n                                             ↑ FAILED HERE' : '';
-        return `| ${i + 1} | ${step.name} | ${icon} | ${duration} |${failedMarker}`;
+        return `| ${i + 1} | ${step.name} | ${icon} | ${duration}${slowFlag} |${failedMarker}`;
     }).join('\n');
     const exactMatchLine = (analysis.exactMatchLine || 'No exact match').replace(/`/g, '\\`').replace(/\n/g, ' ');
     const docsLink = analysis.docsUrl ? `\n\n[Related documentation](${analysis.docsUrl})` : '';
     const MAX_LINES = 10;
     const errorBlock = buildGroupedErrorBlock(analysis.errorLinesByCategory || {}, analysis.exactMatchLine, MAX_LINES, runUrl, analysis.errorLines.length);
+    const meta = buildRunMeta(runAttempt, runNumber, triggerEvent, workflowName);
+    const metaLine = meta ? `\n${meta}\n` : '';
     return `## Action Log Analyzer — ${jobName} Build Report
 
-\`${repo}\` · \`${branch}\` · \`${commit.substring(0, 7)}\`
+\`${repo}\` · \`${branch}\` · \`${commit.substring(0, 7)}\`${metaLine}
 
 ${stepBar}  **${passedCount}/${totalCount} steps passed**
 
@@ -241,7 +332,8 @@ ${stepBar}  **${passedCount}/${totalCount} steps passed**
 |:---------|:------|:------|:-------|
 | Build | ${analysis.category} | ${analysis.totalLines.toLocaleString()} lines | ${SEVERITY_EMOJI[analysis.severity]} ${SEVERITY_LABEL[analysis.severity]} |
 | Pattern | \`${analysis.matchedPattern}\` | ${analysis.errorLines.length} error lines | matched |
-
+${timing && timing.jobDurationMs > 0 ? `| Duration | ${formatDuration(timing.jobDurationMs)} | ${timing.slowestStep ? `Slowest: \`${timing.slowestStep.name}\`` : '—'} | ${timing.queueTimeMs > 30000 ? `⏳ ${formatDuration(timing.queueTimeMs)} queued` : '✅'} |
+` : ''}
 ### Command Timeline
 | # | Command | Status | Duration |
 |:--|:--------|:------:|:---------|
@@ -258,7 +350,13 @@ ${exactMatchLine}
 ### Suggested Fix
 ${analysis.suggestion}${docsLink}
 ${errorBlock}
-${analysis.warningLines.length > 0 ? `
+${testSummary ? `
+### Test Results
+${buildTestResultsSection(testSummary)}
+` : ''}${annotations.length > 0 ? `
+### Annotations (${annotations.length})
+${buildAnnotationsSection(annotations)}
+` : ''}${analysis.warningLines.length > 0 ? `
 ### Warnings (${analysis.warningLines.length})
 ${buildWarningsSection(analysis.warningLines, analysis.warningLinesByCategory, 10)}
 ` : ''}${analysis.buildParams.length > 0 ? `
@@ -277,11 +375,10 @@ ${buildArtifactsAndLinksSection(runUrl, artifacts, extractedLinks, repo)}
 ---
 *[Action Log Analyzer](https://github.com/SKCloudOps/action-log-analyzer)*`;
 }
-function formatJobSummary(analysis, jobName, runUrl, steps, triggeredBy, branch, commit, repo, artifacts = [], extractedLinks = [], gitRefs = [], clonedRepos = []) {
+function formatJobSummary(analysis, jobName, runUrl, steps, triggeredBy, branch, commit, repo, artifacts = [], extractedLinks = [], gitRefs = [], clonedRepos = [], timing = null, testSummary = null, annotations = [], runAttempt = 1, runNumber = 0, triggerEvent = '', workflowName = '') {
     const label = SEVERITY_LABEL[analysis.severity];
     const emoji = SEVERITY_EMOJI[analysis.severity];
     const now = new Date().toUTCString();
-    const patternMeta = `Pattern: \`${analysis.matchedPattern}\` · Category: \`${analysis.category}\``;
     const docsLink = analysis.docsUrl ? `\n\n[Documentation](${analysis.docsUrl})` : '';
     const passedCount = steps.filter(s => s.conclusion === 'success').length;
     const totalCount = steps.length;
@@ -289,18 +386,22 @@ function formatJobSummary(analysis, jobName, runUrl, steps, triggeredBy, branch,
         s.conclusion === 'failure' ? '🔴' :
             s.conclusion === 'skipped' ? '⏭️' : '🟡').join('');
     const failedIdx = steps.findIndex(s => s.conclusion === 'failure');
+    const slowStepNames = new Set(timing?.steps.filter(s => s.isSlow).map(s => s.name) ?? []);
     const commandRows = steps.map((step, i) => {
         const icon = step.conclusion === 'success' ? '✅' : step.conclusion === 'failure' ? '❌' : '⏳';
         const duration = step.started_at && step.completed_at
             ? formatDuration(new Date(step.completed_at).getTime() - new Date(step.started_at).getTime())
             : '—';
+        const slowFlag = slowStepNames.has(step.name) ? ' 🐢' : '';
         const failedMarker = i === failedIdx ? '\n                                             ↑ FAILED HERE' : '';
-        return `| ${i + 1} | ${step.name} | ${icon} | ${duration} |${failedMarker}`;
+        return `| ${i + 1} | ${step.name} | ${icon} | ${duration}${slowFlag} |${failedMarker}`;
     }).join('\n');
     const exactMatchLine = (analysis.exactMatchLine || 'No exact match').replace(/`/g, '\\`').replace(/\n/g, ' ');
+    const meta = buildRunMeta(runAttempt, runNumber, triggerEvent, workflowName);
+    const metaLine = meta ? `\n${meta}\n` : '';
     return `# Action Log Analyzer — ${jobName} Build Report
 
-\`${repo}\` · \`${branch}\` · [\`${commit.substring(0, 7)}\`](https://github.com/${repo}/commit/${commit})
+\`${repo}\` · \`${branch}\` · [\`${commit.substring(0, 7)}\`](https://github.com/${repo}/commit/${commit})${metaLine}
 
 ${stepBar}  **${passedCount}/${totalCount} steps passed**
 
@@ -309,7 +410,8 @@ ${stepBar}  **${passedCount}/${totalCount} steps passed**
 |:---------|:------|:------|:-------|
 | Build | ${analysis.category} | ${analysis.totalLines.toLocaleString()} lines | ${emoji} ${label} |
 | Pattern | \`${analysis.matchedPattern}\` | ${analysis.errorLines.length} error lines | matched |
-
+${timing && timing.jobDurationMs > 0 ? `| Duration | ${formatDuration(timing.jobDurationMs)} | ${timing.slowestStep ? `Slowest: \`${timing.slowestStep.name}\`` : '—'} | ${timing.queueTimeMs > 30000 ? `⏳ ${formatDuration(timing.queueTimeMs)} queued` : '✅'} |
+` : ''}
 ## Command Timeline
 | # | Command | Status | Duration |
 |:--|:--------|:------:|:---------|
@@ -332,7 +434,22 @@ ${analysis.suggestion}${docsLink}
 ${buildGroupedErrorBlockSummary(analysis.errorLinesByCategory || {}, analysis.exactMatchLine, MAX_ERROR_LINES, runUrl, analysis.errorLines.length)}
 
 ---
-${analysis.warningLines.length > 0 ? `
+${testSummary ? `
+## Test Results
+${buildTestResultsSection(testSummary)}
+
+---
+` : ''}${annotations.length > 0 ? `
+## Annotations (${annotations.length})
+${buildAnnotationsSection(annotations)}
+
+---
+` : ''}${timing && timing.jobDurationMs > 0 ? `
+## Performance
+${buildTimingSection(timing)}
+
+---
+` : ''}${analysis.warningLines.length > 0 ? `
 ## Warnings (${analysis.warningLines.length})
 ${buildWarningsSection(analysis.warningLines, analysis.warningLinesByCategory, MAX_ERROR_LINES)}
 
@@ -359,16 +476,21 @@ ${buildArtifactsAndLinksSection(runUrl, artifacts, extractedLinks, repo)}
 ---
 *Action Log Analyzer · ${now}*`;
 }
-function formatSuccessSummary(runUrl, jobs, triggeredBy, branch, commit, repo, artifacts = [], extractedLinks = [], warningLines = [], warningLinesByCategory = {}, buildParams = [], gitRefs = [], clonedRepos = []) {
+function formatSuccessSummary(runUrl, jobs, triggeredBy, branch, commit, repo, artifacts = [], extractedLinks = [], warningLines = [], warningLinesByCategory = {}, buildParams = [], gitRefs = [], clonedRepos = [], timings = [], testSummary = null, annotations = [], runAttempt = 1, runNumber = 0, triggerEvent = '', workflowName = '') {
     const now = new Date().toUTCString();
     const jobRows = jobs.map(job => {
         const icon = job.conclusion === 'success' ? '✅' : job.conclusion === 'failure' ? '❌' : '⏳';
-        return `| ${icon} | \`${job.name}\` | ${job.conclusion ?? 'in progress'} |`;
+        const jobTiming = timings.find(t => t.jobName === job.name);
+        const dur = jobTiming && jobTiming.jobDurationMs > 0 ? formatDuration(jobTiming.jobDurationMs) : '—';
+        return `| ${icon} | \`${job.name}\` | ${job.conclusion ?? 'in progress'} | ${dur} |`;
     }).join('\n');
     const totalSteps = jobs.reduce((sum, j) => sum + (j.steps?.length ?? 0), 0);
     const passedSteps = jobs.reduce((sum, j) => sum + (j.steps?.filter(s => s.conclusion === 'success').length ?? 0), 0);
     const stepBar = jobs.flatMap(j => j.steps ?? []).map(s => s.conclusion === 'success' ? '🟢' : s.conclusion === 'failure' ? '🔴' : '🟡').join('');
     const stepBarDisplay = stepBar ? `\n\n${stepBar}  **${passedSteps}/${totalSteps} steps passed**` : '';
+    const totalDurationMs = timings.reduce((sum, t) => sum + t.jobDurationMs, 0);
+    const allSlowSteps = timings.flatMap(t => t.steps.filter(s => s.isSlow));
+    const maxQueueMs = Math.max(0, ...timings.map(t => t.queueTimeMs));
     let timelineSection = '';
     const allSteps = [];
     for (const job of jobs) {
@@ -376,13 +498,15 @@ function formatSuccessSummary(runUrl, jobs, triggeredBy, branch, commit, repo, a
             allSteps.push({ jobName: job.name, step });
         }
     }
+    const slowStepNames = new Set(allSlowSteps.map(s => s.name));
     if (allSteps.length > 0) {
         const stepRows = allSteps.map(({ jobName, step }, i) => {
             const icon = step.conclusion === 'success' ? '✅' : step.conclusion === 'failure' ? '❌' : '⏳';
             const duration = step.started_at && step.completed_at
                 ? formatDuration(new Date(step.completed_at).getTime() - new Date(step.started_at).getTime())
                 : '—';
-            return `| ${i + 1} | \`${step.name}\` | ${jobName} | ${icon} | ${duration} |`;
+            const slowFlag = slowStepNames.has(step.name) ? ' 🐢' : '';
+            return `| ${i + 1} | \`${step.name}\` | ${jobName} | ${icon} | ${duration}${slowFlag} |`;
         }).join('\n');
         timelineSection = `
 
@@ -391,15 +515,17 @@ function formatSuccessSummary(runUrl, jobs, triggeredBy, branch, commit, repo, a
 |:--|:-----|:----|:------:|:---------|
 ${stepRows}`;
     }
+    const meta = buildRunMeta(runAttempt, runNumber, triggerEvent, workflowName);
+    const metaLine = meta ? `\n${meta}\n` : '';
     return `# Log Analyzer Report
 
 ## All Jobs Passed
 
-\`${repo}\` · \`${branch}\` · [\`${commit.substring(0, 7)}\`](https://github.com/${repo}/commit/${commit})${stepBarDisplay}
+\`${repo}\` · \`${branch}\` · [\`${commit.substring(0, 7)}\`](https://github.com/${repo}/commit/${commit})${metaLine}${stepBarDisplay}
 
 ### Job Summary
-| Status | Job | Result |
-|:------:|:----|:-------|
+| Status | Job | Result | Duration |
+|:------:|:----|:-------|:---------|
 ${jobRows}
 
 ### Run Overview
@@ -409,11 +535,17 @@ ${jobRows}
 | Branch | \`${branch}\` |
 | Commit | [\`${commit.substring(0, 7)}\`](https://github.com/${repo}/commit/${commit}) |
 | Triggered by | \`${triggeredBy}\` |
-| Jobs passed | ${jobs.length} |
+${triggerEvent ? `| Event | \`${triggerEvent}\` |\n` : ''}${workflowName ? `| Workflow | \`${workflowName}\` |\n` : ''}| Jobs passed | ${jobs.length} |
 | Steps completed | ${passedSteps}/${totalSteps} |
-${timelineSection}
+${totalDurationMs > 0 ? `| Total duration | **${formatDuration(totalDurationMs)}** |\n` : ''}${maxQueueMs > 30000 ? `| Max queue wait | ⏳ ${formatDuration(maxQueueMs)} |\n` : ''}${timelineSection}
 
-${warningLines.length > 0 ? `### Warnings (${warningLines.length})
+${testSummary ? `### Test Results
+${buildTestResultsSection(testSummary)}
+
+` : ''}${annotations.length > 0 ? `### Annotations (${annotations.length})
+${buildAnnotationsSection(annotations)}
+
+` : ''}${warningLines.length > 0 ? `### Warnings (${warningLines.length})
 ${buildWarningsSection(warningLines, warningLinesByCategory, 10)}
 
 ` : ''}${buildParams.length > 0 ? `### Build Parameters
@@ -431,8 +563,12 @@ ${buildArtifactsAndLinksSection(runUrl, artifacts, extractedLinks, repo)}
 ---
 *Action Log Analyzer · ${now}*`;
 }
-function formatSuccessPRComment(jobNames, runUrl, artifacts = [], extractedLinks = [], warningLines = [], warningLinesByCategory = {}, buildParams = [], gitRefs = [], clonedRepos = []) {
+function formatSuccessPRComment(jobNames, runUrl, artifacts = [], extractedLinks = [], warningLines = [], warningLinesByCategory = {}, buildParams = [], gitRefs = [], clonedRepos = [], timings = [], testSummary = null, annotations = [], runAttempt = 1, runNumber = 0, triggerEvent = '', workflowName = '') {
     const jobsList = jobNames.map(n => `\`${n}\``).join(', ');
+    const totalDurationMs = timings.reduce((sum, t) => sum + t.jobDurationMs, 0);
+    const durationNote = totalDurationMs > 0 ? ` in **${formatDuration(totalDurationMs)}**` : '';
+    const meta = buildRunMeta(runAttempt, runNumber, triggerEvent, workflowName);
+    const metaLine = meta ? `\n${meta}\n` : '';
     let extra = `\n\n[View workflow run](${runUrl})`;
     if (artifacts.length > 0 || extractedLinks.length > 0) {
         const parts = [];
@@ -455,6 +591,12 @@ function formatSuccessPRComment(jobNames, runUrl, artifacts = [], extractedLinks
         }
         extra = `\n\n${parts.join('\n\n')}\n\n[View workflow run & download](${runUrl})`;
     }
+    const testSection = testSummary
+        ? `\n\n### Test Results\n${buildTestResultsSection(testSummary)}`
+        : '';
+    const annotationsSection = annotations.length > 0
+        ? `\n\n### Annotations (${annotations.length})\n${buildAnnotationsSection(annotations)}`
+        : '';
     const warningSection = warningLines.length > 0
         ? `\n\n### Warnings (${warningLines.length})\n${buildWarningsSection(warningLines, warningLinesByCategory, 10)}`
         : '';
@@ -469,7 +611,7 @@ function formatSuccessPRComment(jobNames, runUrl, artifacts = [], extractedLinks
         : '';
     return `## Log Analyzer Report
 
-All jobs completed successfully: ${jobsList}${warningSection}${paramsSection}${clonedSection}${actionsSection}${extra}
+All jobs completed successfully${durationNote}: ${jobsList}${metaLine}${testSection}${annotationsSection}${warningSection}${paramsSection}${clonedSection}${actionsSection}${extra}
 
 ---
 *[Action Log Analyzer](https://github.com/SKCloudOps/action-log-analyzer) · [Report issue](https://github.com/SKCloudOps/action-log-analyzer/issues)*`;

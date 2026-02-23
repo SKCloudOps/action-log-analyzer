@@ -29966,6 +29966,9 @@ exports.extractBuildParams = extractBuildParams;
 exports.extractGitRefsFromLogs = extractGitRefsFromLogs;
 exports.extractClonedRepos = extractClonedRepos;
 exports.extractGitRefsFromSteps = extractGitRefsFromSteps;
+exports.computeJobTiming = computeJobTiming;
+exports.extractTestResults = extractTestResults;
+exports.extractAnnotations = extractAnnotations;
 exports.analyzeLogs = analyzeLogs;
 const fs = __importStar(__nccwpck_require__(9896));
 const path = __importStar(__nccwpck_require__(6928));
@@ -30308,6 +30311,162 @@ function extractGitRefsFromSteps(steps, jobLogs) {
     }
     return refs;
 }
+function computeJobTiming(job) {
+    const jobStart = job.started_at ? new Date(job.started_at).getTime() : 0;
+    const jobEnd = job.completed_at ? new Date(job.completed_at).getTime() : 0;
+    const jobDurationMs = jobStart && jobEnd ? jobEnd - jobStart : 0;
+    const jobCreated = job.created_at ? new Date(job.created_at).getTime() : 0;
+    const queueTimeMs = jobCreated && jobStart ? Math.max(0, jobStart - jobCreated) : 0;
+    const steps = (job.steps ?? []).map(s => {
+        const start = s.started_at ? new Date(s.started_at).getTime() : 0;
+        const end = s.completed_at ? new Date(s.completed_at).getTime() : 0;
+        const durationMs = start && end ? end - start : 0;
+        const isSlow = durationMs > 300000 || (jobDurationMs > 0 && durationMs / jobDurationMs > 0.6);
+        return { name: s.name, durationMs, conclusion: s.conclusion, isSlow };
+    });
+    const slowestStep = steps.length > 0
+        ? steps.reduce((max, s) => s.durationMs > max.durationMs ? s : max, steps[0])
+        : null;
+    return { jobName: job.name, jobDurationMs, queueTimeMs, steps, slowestStep };
+}
+function extractTestResults(lines) {
+    let framework = '';
+    let passed = 0;
+    let failed = 0;
+    let skipped = 0;
+    let total = 0;
+    const failedTests = [];
+    let detected = false;
+    for (const raw of lines) {
+        const line = cleanLine(raw);
+        if (!line)
+            continue;
+        // Jest / Vitest: "FAIL src/foo.test.ts"
+        const jestFail = line.match(/^FAIL\s+(\S+\.(?:test|spec)\.\w+)/);
+        if (jestFail) {
+            failedTests.push(jestFail[1]);
+            framework = framework || 'Jest/Vitest';
+        }
+        // Jest / Vitest summary: "Tests:  2 failed, 8 passed, 10 total"
+        const jestSummary = line.match(/Tests:\s+(?:(\d+)\s+failed,?\s*)?(?:(\d+)\s+skipped,?\s*)?(?:(\d+)\s+passed,?\s*)?(\d+)\s+total/);
+        if (jestSummary) {
+            framework = framework || 'Jest/Vitest';
+            failed = parseInt(jestSummary[1] || '0', 10);
+            skipped = parseInt(jestSummary[2] || '0', 10);
+            passed = parseInt(jestSummary[3] || '0', 10);
+            total = parseInt(jestSummary[4], 10);
+            detected = true;
+        }
+        // pytest: "FAILED tests/test_foo.py::test_bar"
+        const pytestFail = line.match(/^FAILED\s+(\S+::\S+)/);
+        if (pytestFail) {
+            failedTests.push(pytestFail[1]);
+            framework = framework || 'pytest';
+        }
+        // pytest summary: "2 failed, 8 passed, 1 skipped" or "= 2 failed, 8 passed ="
+        const pytestSummary = line.match(/=+\s*(?:(\d+)\s+failed)?[,\s]*(?:(\d+)\s+passed)?[,\s]*(?:(\d+)\s+skipped)?[,\s]*(?:(\d+)\s+error)?.*=+/);
+        if (pytestSummary && (pytestSummary[1] || pytestSummary[2])) {
+            framework = framework || 'pytest';
+            failed = parseInt(pytestSummary[1] || '0', 10);
+            passed = parseInt(pytestSummary[2] || '0', 10);
+            skipped = parseInt(pytestSummary[3] || '0', 10);
+            total = failed + passed + skipped + parseInt(pytestSummary[4] || '0', 10);
+            detected = true;
+        }
+        // Go: "--- FAIL: TestFoo (0.01s)"
+        const goFail = line.match(/^---\s+FAIL:\s+(\S+)/);
+        if (goFail) {
+            failedTests.push(goFail[1]);
+            framework = framework || 'Go test';
+        }
+        // Go summary: "FAIL	package/name	0.123s"
+        const goSummary = line.match(/^(ok|FAIL)\s+(\S+)\s+[\d.]+s/);
+        if (goSummary) {
+            framework = framework || 'Go test';
+        }
+        // Go count: "=== RUN" lines are tests
+        if (/^===\s+RUN\s+/.test(line)) {
+            framework = framework || 'Go test';
+        }
+        // JUnit-style: "Tests run: 10, Failures: 2, Errors: 1, Skipped: 0"
+        const junitSummary = line.match(/Tests\s+run:\s*(\d+),\s*Failures:\s*(\d+),\s*Errors:\s*(\d+)(?:,\s*Skipped:\s*(\d+))?/);
+        if (junitSummary) {
+            framework = framework || 'JUnit';
+            total = parseInt(junitSummary[1], 10);
+            failed = parseInt(junitSummary[2], 10) + parseInt(junitSummary[3], 10);
+            skipped = parseInt(junitSummary[4] || '0', 10);
+            passed = total - failed - skipped;
+            detected = true;
+        }
+        // Mocha: "5 passing (2s)" and "2 failing"
+        const mochaPassing = line.match(/(\d+)\s+passing/);
+        if (mochaPassing) {
+            passed = parseInt(mochaPassing[1], 10);
+            framework = framework || 'Mocha';
+        }
+        const mochaFailing = line.match(/(\d+)\s+failing/);
+        if (mochaFailing && framework === 'Mocha') {
+            failed = parseInt(mochaFailing[1], 10);
+            detected = true;
+        }
+        // RSpec: "10 examples, 2 failures"
+        const rspecSummary = line.match(/(\d+)\s+examples?,\s+(\d+)\s+failures?(?:,\s+(\d+)\s+pending)?/);
+        if (rspecSummary) {
+            framework = 'RSpec';
+            total = parseInt(rspecSummary[1], 10);
+            failed = parseInt(rspecSummary[2], 10);
+            skipped = parseInt(rspecSummary[3] || '0', 10);
+            passed = total - failed - skipped;
+            detected = true;
+        }
+        // PHPUnit: "Tests: 10, Assertions: 20, Failures: 2"
+        const phpunitSummary = line.match(/Tests:\s*(\d+),\s*Assertions:\s*\d+(?:,\s*Failures:\s*(\d+))?(?:,\s*Errors:\s*(\d+))?/);
+        if (phpunitSummary) {
+            framework = 'PHPUnit';
+            total = parseInt(phpunitSummary[1], 10);
+            failed = parseInt(phpunitSummary[2] || '0', 10) + parseInt(phpunitSummary[3] || '0', 10);
+            passed = total - failed;
+            detected = true;
+        }
+    }
+    if (!detected && failedTests.length === 0)
+        return null;
+    if (!detected && failedTests.length > 0) {
+        failed = failedTests.length;
+        total = failed;
+    }
+    return { framework, passed, failed, skipped, total, failedTests: failedTests.slice(0, 15) };
+}
+function extractAnnotations(lines) {
+    const annotations = [];
+    const seen = new Set();
+    for (const raw of lines) {
+        // Match ##[error], ##[warning], ##[notice] before they get stripped
+        const annoMatch = raw.match(/##\[(error|warning|notice)\](.*)/);
+        if (!annoMatch)
+            continue;
+        const level = annoMatch[1];
+        let message = annoMatch[2].trim();
+        let file;
+        let line;
+        // Parse structured format: "##[error]file=path,line=N::message"
+        // or simpler "##[error]::message"
+        const structuredMatch = message.match(/^(?:file=([^,]+))?(?:,line=(\d+))?(?:,\w+=[^:]*)*::(.+)/);
+        if (structuredMatch) {
+            file = structuredMatch[1] || undefined;
+            line = structuredMatch[2] ? parseInt(structuredMatch[2], 10) : undefined;
+            message = structuredMatch[3]?.trim() || message;
+        }
+        if (!message || message.length < 3)
+            continue;
+        const uid = `${level}:${message}`;
+        if (seen.has(uid))
+            continue;
+        seen.add(uid);
+        annotations.push({ level, message, file, line });
+    }
+    return annotations.slice(0, 30);
+}
 function extractFailedStep(lines) {
     for (const line of lines) {
         const clean = cleanLine(line);
@@ -30339,7 +30498,8 @@ async function analyzeLogs(logs, patterns, stepName) {
     const buildParams = extractBuildParams(rawLines);
     core.info(`Scanned ${totalLines} log lines, found ${errorLines.length} error lines, ${warningLines.length} warning lines, ${buildParams.length} build params`);
     const warningLinesByCategory = categorizeWarningLines(warningLines, patterns);
-    for (const p of patterns) {
+    const sorted = [...patterns].sort((a, b) => (a.priority ?? 50) - (b.priority ?? 50));
+    for (const p of sorted) {
         const regex = new RegExp(p.pattern, p.flags);
         for (const { cleaned, lineNumber } of cleanedLines) {
             if (cleaned.length === 0)
@@ -30579,6 +30739,93 @@ function buildActionsAndImagesTable(refs) {
 |:-----|:-------------------|:----------|
 ${rows.join('\n')}`;
 }
+function buildTimingSection(timing) {
+    if (timing.jobDurationMs === 0)
+        return '';
+    const parts = [];
+    parts.push(`| Metric | Value |`);
+    parts.push(`|:-------|:------|`);
+    parts.push(`| Total duration | **${formatDuration(timing.jobDurationMs)}** |`);
+    if (timing.queueTimeMs > 30000) {
+        parts.push(`| Queue wait | ${formatDuration(timing.queueTimeMs)} |`);
+    }
+    if (timing.slowestStep) {
+        const pct = timing.jobDurationMs > 0
+            ? ` (${Math.round(timing.slowestStep.durationMs / timing.jobDurationMs * 100)}%)`
+            : '';
+        parts.push(`| Slowest step | \`${timing.slowestStep.name}\` — ${formatDuration(timing.slowestStep.durationMs)}${pct} |`);
+    }
+    const slowSteps = timing.steps.filter(s => s.isSlow && s.name !== timing.slowestStep?.name);
+    if (slowSteps.length > 0) {
+        const names = slowSteps.map(s => `\`${s.name}\` (${formatDuration(s.durationMs)})`).join(', ');
+        parts.push(`| Other slow steps | ${names} |`);
+    }
+    return parts.join('\n');
+}
+function buildTestResultsSection(testSummary) {
+    const parts = [];
+    const statusIcon = testSummary.failed > 0 ? '❌' : '✅';
+    parts.push(`| Framework | Passed | Failed | Skipped | Total | Status |`);
+    parts.push(`|:----------|-------:|-------:|--------:|------:|:------:|`);
+    parts.push(`| ${testSummary.framework || 'Unknown'} | ${testSummary.passed} | ${testSummary.failed} | ${testSummary.skipped} | ${testSummary.total} | ${statusIcon} |`);
+    if (testSummary.failedTests.length > 0) {
+        parts.push('');
+        parts.push('<details>');
+        parts.push(`<summary>Failed tests (${testSummary.failedTests.length})</summary>`);
+        parts.push('');
+        parts.push('```text');
+        parts.push(testSummary.failedTests.join('\n'));
+        parts.push('```');
+        parts.push('</details>');
+    }
+    return parts.join('\n');
+}
+function buildAnnotationsSection(annotations) {
+    if (annotations.length === 0)
+        return '';
+    const grouped = {};
+    for (const a of annotations) {
+        const key = a.level;
+        if (!grouped[key])
+            grouped[key] = [];
+        grouped[key].push(a);
+    }
+    const levelOrder = ['error', 'warning', 'notice'];
+    const levelIcons = { error: '🔴', warning: '🟡', notice: '🔵' };
+    const parts = [];
+    for (const level of levelOrder) {
+        const items = grouped[level];
+        if (!items || items.length === 0)
+            continue;
+        parts.push(`<details>`);
+        parts.push(`<summary>${levelIcons[level]} ${level.charAt(0).toUpperCase() + level.slice(1)} (${items.length})</summary>`);
+        parts.push('');
+        parts.push('```text');
+        for (const a of items.slice(0, 10)) {
+            const loc = a.file ? ` [${a.file}${a.line ? `:${a.line}` : ''}]` : '';
+            parts.push(`${a.message}${loc}`);
+        }
+        if (items.length > 10)
+            parts.push(`... ${items.length - 10} more`);
+        parts.push('```');
+        parts.push('</details>');
+    }
+    return parts.join('\n');
+}
+function buildRunMeta(runAttempt, runNumber, triggerEvent, workflowName) {
+    const parts = [];
+    if (workflowName)
+        parts.push(`**${workflowName}**`);
+    if (triggerEvent)
+        parts.push(`\`${triggerEvent}\``);
+    if (runNumber > 0) {
+        let runLabel = `Run #${runNumber}`;
+        if (runAttempt > 1)
+            runLabel += ` · Attempt #${runAttempt} 🔄`;
+        parts.push(runLabel);
+    }
+    return parts.length > 0 ? parts.join(' · ') : '';
+}
 function formatBytes(bytes) {
     if (bytes < 1024)
         return `${bytes} B`;
@@ -30613,28 +30860,32 @@ function buildArtifactsAndLinksSection(runUrl, artifacts, extractedLinks, repo) 
     }
     return parts.join('\n');
 }
-function formatPRComment(analysis, jobName, runUrl, steps, repo, branch, commit, artifacts = [], extractedLinks = [], gitRefs = [], clonedRepos = []) {
+function formatPRComment(analysis, jobName, runUrl, steps, repo, branch, commit, artifacts = [], extractedLinks = [], gitRefs = [], clonedRepos = [], timing = null, testSummary = null, annotations = [], runAttempt = 1, runNumber = 0, triggerEvent = '', workflowName = '') {
     const passedCount = steps.filter(s => s.conclusion === 'success').length;
     const totalCount = steps.length;
     const stepBar = steps.map(s => s.conclusion === 'success' ? '🟢' :
         s.conclusion === 'failure' ? '🔴' :
             s.conclusion === 'skipped' ? '⏭️' : '🟡').join('');
     const failedIdx = steps.findIndex(s => s.conclusion === 'failure');
+    const slowStepNames = new Set(timing?.steps.filter(s => s.isSlow).map(s => s.name) ?? []);
     const commandRows = steps.map((step, i) => {
         const icon = step.conclusion === 'success' ? '✅' : step.conclusion === 'failure' ? '❌' : '⏳';
         const duration = step.started_at && step.completed_at
             ? formatDuration(new Date(step.completed_at).getTime() - new Date(step.started_at).getTime())
             : '—';
+        const slowFlag = slowStepNames.has(step.name) ? ' 🐢' : '';
         const failedMarker = i === failedIdx ? '\n                                             ↑ FAILED HERE' : '';
-        return `| ${i + 1} | ${step.name} | ${icon} | ${duration} |${failedMarker}`;
+        return `| ${i + 1} | ${step.name} | ${icon} | ${duration}${slowFlag} |${failedMarker}`;
     }).join('\n');
     const exactMatchLine = (analysis.exactMatchLine || 'No exact match').replace(/`/g, '\\`').replace(/\n/g, ' ');
     const docsLink = analysis.docsUrl ? `\n\n[Related documentation](${analysis.docsUrl})` : '';
     const MAX_LINES = 10;
     const errorBlock = buildGroupedErrorBlock(analysis.errorLinesByCategory || {}, analysis.exactMatchLine, MAX_LINES, runUrl, analysis.errorLines.length);
+    const meta = buildRunMeta(runAttempt, runNumber, triggerEvent, workflowName);
+    const metaLine = meta ? `\n${meta}\n` : '';
     return `## Action Log Analyzer — ${jobName} Build Report
 
-\`${repo}\` · \`${branch}\` · \`${commit.substring(0, 7)}\`
+\`${repo}\` · \`${branch}\` · \`${commit.substring(0, 7)}\`${metaLine}
 
 ${stepBar}  **${passedCount}/${totalCount} steps passed**
 
@@ -30643,7 +30894,8 @@ ${stepBar}  **${passedCount}/${totalCount} steps passed**
 |:---------|:------|:------|:-------|
 | Build | ${analysis.category} | ${analysis.totalLines.toLocaleString()} lines | ${SEVERITY_EMOJI[analysis.severity]} ${SEVERITY_LABEL[analysis.severity]} |
 | Pattern | \`${analysis.matchedPattern}\` | ${analysis.errorLines.length} error lines | matched |
-
+${timing && timing.jobDurationMs > 0 ? `| Duration | ${formatDuration(timing.jobDurationMs)} | ${timing.slowestStep ? `Slowest: \`${timing.slowestStep.name}\`` : '—'} | ${timing.queueTimeMs > 30000 ? `⏳ ${formatDuration(timing.queueTimeMs)} queued` : '✅'} |
+` : ''}
 ### Command Timeline
 | # | Command | Status | Duration |
 |:--|:--------|:------:|:---------|
@@ -30660,7 +30912,13 @@ ${exactMatchLine}
 ### Suggested Fix
 ${analysis.suggestion}${docsLink}
 ${errorBlock}
-${analysis.warningLines.length > 0 ? `
+${testSummary ? `
+### Test Results
+${buildTestResultsSection(testSummary)}
+` : ''}${annotations.length > 0 ? `
+### Annotations (${annotations.length})
+${buildAnnotationsSection(annotations)}
+` : ''}${analysis.warningLines.length > 0 ? `
 ### Warnings (${analysis.warningLines.length})
 ${buildWarningsSection(analysis.warningLines, analysis.warningLinesByCategory, 10)}
 ` : ''}${analysis.buildParams.length > 0 ? `
@@ -30679,11 +30937,10 @@ ${buildArtifactsAndLinksSection(runUrl, artifacts, extractedLinks, repo)}
 ---
 *[Action Log Analyzer](https://github.com/SKCloudOps/action-log-analyzer)*`;
 }
-function formatJobSummary(analysis, jobName, runUrl, steps, triggeredBy, branch, commit, repo, artifacts = [], extractedLinks = [], gitRefs = [], clonedRepos = []) {
+function formatJobSummary(analysis, jobName, runUrl, steps, triggeredBy, branch, commit, repo, artifacts = [], extractedLinks = [], gitRefs = [], clonedRepos = [], timing = null, testSummary = null, annotations = [], runAttempt = 1, runNumber = 0, triggerEvent = '', workflowName = '') {
     const label = SEVERITY_LABEL[analysis.severity];
     const emoji = SEVERITY_EMOJI[analysis.severity];
     const now = new Date().toUTCString();
-    const patternMeta = `Pattern: \`${analysis.matchedPattern}\` · Category: \`${analysis.category}\``;
     const docsLink = analysis.docsUrl ? `\n\n[Documentation](${analysis.docsUrl})` : '';
     const passedCount = steps.filter(s => s.conclusion === 'success').length;
     const totalCount = steps.length;
@@ -30691,18 +30948,22 @@ function formatJobSummary(analysis, jobName, runUrl, steps, triggeredBy, branch,
         s.conclusion === 'failure' ? '🔴' :
             s.conclusion === 'skipped' ? '⏭️' : '🟡').join('');
     const failedIdx = steps.findIndex(s => s.conclusion === 'failure');
+    const slowStepNames = new Set(timing?.steps.filter(s => s.isSlow).map(s => s.name) ?? []);
     const commandRows = steps.map((step, i) => {
         const icon = step.conclusion === 'success' ? '✅' : step.conclusion === 'failure' ? '❌' : '⏳';
         const duration = step.started_at && step.completed_at
             ? formatDuration(new Date(step.completed_at).getTime() - new Date(step.started_at).getTime())
             : '—';
+        const slowFlag = slowStepNames.has(step.name) ? ' 🐢' : '';
         const failedMarker = i === failedIdx ? '\n                                             ↑ FAILED HERE' : '';
-        return `| ${i + 1} | ${step.name} | ${icon} | ${duration} |${failedMarker}`;
+        return `| ${i + 1} | ${step.name} | ${icon} | ${duration}${slowFlag} |${failedMarker}`;
     }).join('\n');
     const exactMatchLine = (analysis.exactMatchLine || 'No exact match').replace(/`/g, '\\`').replace(/\n/g, ' ');
+    const meta = buildRunMeta(runAttempt, runNumber, triggerEvent, workflowName);
+    const metaLine = meta ? `\n${meta}\n` : '';
     return `# Action Log Analyzer — ${jobName} Build Report
 
-\`${repo}\` · \`${branch}\` · [\`${commit.substring(0, 7)}\`](https://github.com/${repo}/commit/${commit})
+\`${repo}\` · \`${branch}\` · [\`${commit.substring(0, 7)}\`](https://github.com/${repo}/commit/${commit})${metaLine}
 
 ${stepBar}  **${passedCount}/${totalCount} steps passed**
 
@@ -30711,7 +30972,8 @@ ${stepBar}  **${passedCount}/${totalCount} steps passed**
 |:---------|:------|:------|:-------|
 | Build | ${analysis.category} | ${analysis.totalLines.toLocaleString()} lines | ${emoji} ${label} |
 | Pattern | \`${analysis.matchedPattern}\` | ${analysis.errorLines.length} error lines | matched |
-
+${timing && timing.jobDurationMs > 0 ? `| Duration | ${formatDuration(timing.jobDurationMs)} | ${timing.slowestStep ? `Slowest: \`${timing.slowestStep.name}\`` : '—'} | ${timing.queueTimeMs > 30000 ? `⏳ ${formatDuration(timing.queueTimeMs)} queued` : '✅'} |
+` : ''}
 ## Command Timeline
 | # | Command | Status | Duration |
 |:--|:--------|:------:|:---------|
@@ -30734,7 +30996,22 @@ ${analysis.suggestion}${docsLink}
 ${buildGroupedErrorBlockSummary(analysis.errorLinesByCategory || {}, analysis.exactMatchLine, MAX_ERROR_LINES, runUrl, analysis.errorLines.length)}
 
 ---
-${analysis.warningLines.length > 0 ? `
+${testSummary ? `
+## Test Results
+${buildTestResultsSection(testSummary)}
+
+---
+` : ''}${annotations.length > 0 ? `
+## Annotations (${annotations.length})
+${buildAnnotationsSection(annotations)}
+
+---
+` : ''}${timing && timing.jobDurationMs > 0 ? `
+## Performance
+${buildTimingSection(timing)}
+
+---
+` : ''}${analysis.warningLines.length > 0 ? `
 ## Warnings (${analysis.warningLines.length})
 ${buildWarningsSection(analysis.warningLines, analysis.warningLinesByCategory, MAX_ERROR_LINES)}
 
@@ -30761,16 +31038,21 @@ ${buildArtifactsAndLinksSection(runUrl, artifacts, extractedLinks, repo)}
 ---
 *Action Log Analyzer · ${now}*`;
 }
-function formatSuccessSummary(runUrl, jobs, triggeredBy, branch, commit, repo, artifacts = [], extractedLinks = [], warningLines = [], warningLinesByCategory = {}, buildParams = [], gitRefs = [], clonedRepos = []) {
+function formatSuccessSummary(runUrl, jobs, triggeredBy, branch, commit, repo, artifacts = [], extractedLinks = [], warningLines = [], warningLinesByCategory = {}, buildParams = [], gitRefs = [], clonedRepos = [], timings = [], testSummary = null, annotations = [], runAttempt = 1, runNumber = 0, triggerEvent = '', workflowName = '') {
     const now = new Date().toUTCString();
     const jobRows = jobs.map(job => {
         const icon = job.conclusion === 'success' ? '✅' : job.conclusion === 'failure' ? '❌' : '⏳';
-        return `| ${icon} | \`${job.name}\` | ${job.conclusion ?? 'in progress'} |`;
+        const jobTiming = timings.find(t => t.jobName === job.name);
+        const dur = jobTiming && jobTiming.jobDurationMs > 0 ? formatDuration(jobTiming.jobDurationMs) : '—';
+        return `| ${icon} | \`${job.name}\` | ${job.conclusion ?? 'in progress'} | ${dur} |`;
     }).join('\n');
     const totalSteps = jobs.reduce((sum, j) => sum + (j.steps?.length ?? 0), 0);
     const passedSteps = jobs.reduce((sum, j) => sum + (j.steps?.filter(s => s.conclusion === 'success').length ?? 0), 0);
     const stepBar = jobs.flatMap(j => j.steps ?? []).map(s => s.conclusion === 'success' ? '🟢' : s.conclusion === 'failure' ? '🔴' : '🟡').join('');
     const stepBarDisplay = stepBar ? `\n\n${stepBar}  **${passedSteps}/${totalSteps} steps passed**` : '';
+    const totalDurationMs = timings.reduce((sum, t) => sum + t.jobDurationMs, 0);
+    const allSlowSteps = timings.flatMap(t => t.steps.filter(s => s.isSlow));
+    const maxQueueMs = Math.max(0, ...timings.map(t => t.queueTimeMs));
     let timelineSection = '';
     const allSteps = [];
     for (const job of jobs) {
@@ -30778,13 +31060,15 @@ function formatSuccessSummary(runUrl, jobs, triggeredBy, branch, commit, repo, a
             allSteps.push({ jobName: job.name, step });
         }
     }
+    const slowStepNames = new Set(allSlowSteps.map(s => s.name));
     if (allSteps.length > 0) {
         const stepRows = allSteps.map(({ jobName, step }, i) => {
             const icon = step.conclusion === 'success' ? '✅' : step.conclusion === 'failure' ? '❌' : '⏳';
             const duration = step.started_at && step.completed_at
                 ? formatDuration(new Date(step.completed_at).getTime() - new Date(step.started_at).getTime())
                 : '—';
-            return `| ${i + 1} | \`${step.name}\` | ${jobName} | ${icon} | ${duration} |`;
+            const slowFlag = slowStepNames.has(step.name) ? ' 🐢' : '';
+            return `| ${i + 1} | \`${step.name}\` | ${jobName} | ${icon} | ${duration}${slowFlag} |`;
         }).join('\n');
         timelineSection = `
 
@@ -30793,15 +31077,17 @@ function formatSuccessSummary(runUrl, jobs, triggeredBy, branch, commit, repo, a
 |:--|:-----|:----|:------:|:---------|
 ${stepRows}`;
     }
+    const meta = buildRunMeta(runAttempt, runNumber, triggerEvent, workflowName);
+    const metaLine = meta ? `\n${meta}\n` : '';
     return `# Log Analyzer Report
 
 ## All Jobs Passed
 
-\`${repo}\` · \`${branch}\` · [\`${commit.substring(0, 7)}\`](https://github.com/${repo}/commit/${commit})${stepBarDisplay}
+\`${repo}\` · \`${branch}\` · [\`${commit.substring(0, 7)}\`](https://github.com/${repo}/commit/${commit})${metaLine}${stepBarDisplay}
 
 ### Job Summary
-| Status | Job | Result |
-|:------:|:----|:-------|
+| Status | Job | Result | Duration |
+|:------:|:----|:-------|:---------|
 ${jobRows}
 
 ### Run Overview
@@ -30811,11 +31097,17 @@ ${jobRows}
 | Branch | \`${branch}\` |
 | Commit | [\`${commit.substring(0, 7)}\`](https://github.com/${repo}/commit/${commit}) |
 | Triggered by | \`${triggeredBy}\` |
-| Jobs passed | ${jobs.length} |
+${triggerEvent ? `| Event | \`${triggerEvent}\` |\n` : ''}${workflowName ? `| Workflow | \`${workflowName}\` |\n` : ''}| Jobs passed | ${jobs.length} |
 | Steps completed | ${passedSteps}/${totalSteps} |
-${timelineSection}
+${totalDurationMs > 0 ? `| Total duration | **${formatDuration(totalDurationMs)}** |\n` : ''}${maxQueueMs > 30000 ? `| Max queue wait | ⏳ ${formatDuration(maxQueueMs)} |\n` : ''}${timelineSection}
 
-${warningLines.length > 0 ? `### Warnings (${warningLines.length})
+${testSummary ? `### Test Results
+${buildTestResultsSection(testSummary)}
+
+` : ''}${annotations.length > 0 ? `### Annotations (${annotations.length})
+${buildAnnotationsSection(annotations)}
+
+` : ''}${warningLines.length > 0 ? `### Warnings (${warningLines.length})
 ${buildWarningsSection(warningLines, warningLinesByCategory, 10)}
 
 ` : ''}${buildParams.length > 0 ? `### Build Parameters
@@ -30833,8 +31125,12 @@ ${buildArtifactsAndLinksSection(runUrl, artifacts, extractedLinks, repo)}
 ---
 *Action Log Analyzer · ${now}*`;
 }
-function formatSuccessPRComment(jobNames, runUrl, artifacts = [], extractedLinks = [], warningLines = [], warningLinesByCategory = {}, buildParams = [], gitRefs = [], clonedRepos = []) {
+function formatSuccessPRComment(jobNames, runUrl, artifacts = [], extractedLinks = [], warningLines = [], warningLinesByCategory = {}, buildParams = [], gitRefs = [], clonedRepos = [], timings = [], testSummary = null, annotations = [], runAttempt = 1, runNumber = 0, triggerEvent = '', workflowName = '') {
     const jobsList = jobNames.map(n => `\`${n}\``).join(', ');
+    const totalDurationMs = timings.reduce((sum, t) => sum + t.jobDurationMs, 0);
+    const durationNote = totalDurationMs > 0 ? ` in **${formatDuration(totalDurationMs)}**` : '';
+    const meta = buildRunMeta(runAttempt, runNumber, triggerEvent, workflowName);
+    const metaLine = meta ? `\n${meta}\n` : '';
     let extra = `\n\n[View workflow run](${runUrl})`;
     if (artifacts.length > 0 || extractedLinks.length > 0) {
         const parts = [];
@@ -30857,6 +31153,12 @@ function formatSuccessPRComment(jobNames, runUrl, artifacts = [], extractedLinks
         }
         extra = `\n\n${parts.join('\n\n')}\n\n[View workflow run & download](${runUrl})`;
     }
+    const testSection = testSummary
+        ? `\n\n### Test Results\n${buildTestResultsSection(testSummary)}`
+        : '';
+    const annotationsSection = annotations.length > 0
+        ? `\n\n### Annotations (${annotations.length})\n${buildAnnotationsSection(annotations)}`
+        : '';
     const warningSection = warningLines.length > 0
         ? `\n\n### Warnings (${warningLines.length})\n${buildWarningsSection(warningLines, warningLinesByCategory, 10)}`
         : '';
@@ -30871,7 +31173,7 @@ function formatSuccessPRComment(jobNames, runUrl, artifacts = [], extractedLinks
         : '';
     return `## Log Analyzer Report
 
-All jobs completed successfully: ${jobsList}${warningSection}${paramsSection}${clonedSection}${actionsSection}${extra}
+All jobs completed successfully${durationNote}: ${jobsList}${metaLine}${testSection}${annotationsSection}${warningSection}${paramsSection}${clonedSection}${actionsSection}${extra}
 
 ---
 *[Action Log Analyzer](https://github.com/SKCloudOps/action-log-analyzer) · [Report issue](https://github.com/SKCloudOps/action-log-analyzer/issues)*`;
@@ -30923,6 +31225,14 @@ const core = __importStar(__nccwpck_require__(7484));
 const github = __importStar(__nccwpck_require__(3228));
 const analyzer_1 = __nccwpck_require__(8561);
 const formatter_1 = __nccwpck_require__(1845);
+function formatDurationIndex(ms) {
+    const sec = Math.round(ms / 1000);
+    if (sec < 60)
+        return `${sec}s`;
+    const m = Math.floor(sec / 60);
+    const s = sec % 60;
+    return s > 0 ? `${m}m ${s}s` : `${m}m`;
+}
 function cleanLogLine(raw) {
     return raw
         .replace(/^\d{4}-\d{2}-\d{2}T[\d:.]+Z\s+/, '')
@@ -31062,6 +31372,13 @@ async function run() {
         const commit = context.sha;
         const triggeredBy = context.actor;
         const repoFullName = `${owner}/${repo}`;
+        const runAttempt = parseInt(process.env.GITHUB_RUN_ATTEMPT || '1', 10);
+        const runNumber = parseInt(process.env.GITHUB_RUN_NUMBER || '0', 10);
+        const triggerEvent = context.eventName || '';
+        const workflowName = process.env.GITHUB_WORKFLOW || '';
+        if (runAttempt > 1) {
+            core.info(`This is attempt #${runAttempt} of run #${runNumber}`);
+        }
         const { data: jobsData } = await octokit.rest.actions.listJobsForWorkflowRun({
             owner, repo, run_id: runId
         });
@@ -31073,13 +31390,15 @@ async function run() {
         });
         if (failedJobs.length === 0) {
             core.info('No failed jobs. Posting success summary.');
-            // Only show completed jobs (exclude in-progress e.g. analyze-logs itself)
             const completedJobs = jobsData.jobs.filter(j => j.conclusion != null);
+            const allTimings = completedJobs.map(j => (0, analyzer_1.computeJobTiming)(j));
             let extractedLinks = [];
             let allWarnings = [];
             let allBuildParams = [];
             let allGitRefs = [];
             let allClonedRepos = [];
+            let allTestSummary = null;
+            let allAnnotations = [];
             const successfulJobs = jobsData.jobs.filter(j => j.conclusion === 'success');
             for (const job of successfulJobs.slice(0, 3)) {
                 try {
@@ -31094,6 +31413,10 @@ async function run() {
                     allGitRefs = [...allGitRefs, ...(0, analyzer_1.extractGitRefsFromLogs)(logLines)];
                     allGitRefs = [...allGitRefs, ...(0, analyzer_1.extractGitRefsFromSteps)(job.steps ?? [], logs)];
                     allClonedRepos = [...allClonedRepos, ...(0, analyzer_1.extractClonedRepos)(logLines)];
+                    allAnnotations = [...allAnnotations, ...(0, analyzer_1.extractAnnotations)(logLines)];
+                    if (!allTestSummary) {
+                        allTestSummary = (0, analyzer_1.extractTestResults)(logLines);
+                    }
                     const seen = new Set();
                     extractedLinks = extractedLinks.filter(l => {
                         if (seen.has(l.url))
@@ -31106,7 +31429,6 @@ async function run() {
                     /* skip if logs unavailable */
                 }
             }
-            // Deduplicate
             allWarnings = [...new Set(allWarnings)];
             const seenParams = new Set();
             allBuildParams = allBuildParams.filter(p => {
@@ -31131,6 +31453,14 @@ async function run() {
                 seenCloned.add(r.repository);
                 return true;
             }).slice(0, 20);
+            const seenAnno = new Set();
+            allAnnotations = allAnnotations.filter(a => {
+                const uid = `${a.level}:${a.message}`;
+                if (seenAnno.has(uid))
+                    return false;
+                seenAnno.add(uid);
+                return true;
+            }).slice(0, 30);
             const warningLinesByCategory = categorizeWarnings(allWarnings);
             if (allWarnings.length > 0) {
                 core.info(`Found ${allWarnings.length} warning(s) in successful job logs`);
@@ -31144,15 +31474,22 @@ async function run() {
             if (allClonedRepos.length > 0) {
                 core.info(`Detected ${allClonedRepos.length} cloned repository(ies)`);
             }
+            if (allTestSummary) {
+                core.info(`Test results: ${allTestSummary.passed} passed, ${allTestSummary.failed} failed (${allTestSummary.framework})`);
+            }
+            if (allAnnotations.length > 0) {
+                core.info(`Collected ${allAnnotations.length} annotation(s)`);
+            }
+            const totalDurationMs = allTimings.reduce((sum, t) => sum + t.jobDurationMs, 0);
             if (postSummary) {
-                const successSummary = (0, formatter_1.formatSuccessSummary)(runUrl, completedJobs, triggeredBy, branch, commit, repoFullName, artifacts, extractedLinks, allWarnings, warningLinesByCategory, allBuildParams, allGitRefs, allClonedRepos);
+                const successSummary = (0, formatter_1.formatSuccessSummary)(runUrl, completedJobs, triggeredBy, branch, commit, repoFullName, artifacts, extractedLinks, allWarnings, warningLinesByCategory, allBuildParams, allGitRefs, allClonedRepos, allTimings, allTestSummary, allAnnotations, runAttempt, runNumber, triggerEvent, workflowName);
                 await core.summary.addRaw(successSummary).write();
                 core.info('Success summary posted.');
             }
             if (postComment && context.payload.pull_request) {
                 const prNumber = context.payload.pull_request.number;
                 const jobNames = completedJobs.map(j => j.name);
-                const comment = (0, formatter_1.formatSuccessPRComment)(jobNames, runUrl, artifacts, extractedLinks, allWarnings, warningLinesByCategory, allBuildParams, allGitRefs, allClonedRepos);
+                const comment = (0, formatter_1.formatSuccessPRComment)(jobNames, runUrl, artifacts, extractedLinks, allWarnings, warningLinesByCategory, allBuildParams, allGitRefs, allClonedRepos, allTimings, allTestSummary, allAnnotations, runAttempt, runNumber, triggerEvent, workflowName);
                 const { data: comments } = await octokit.rest.issues.listComments({
                     owner, repo, issue_number: prNumber
                 });
@@ -31179,6 +31516,17 @@ async function run() {
             core.setOutput('warning-count', String(allWarnings.length));
             core.setOutput('build-params', JSON.stringify(allBuildParams));
             core.setOutput('git-refs', JSON.stringify(allGitRefs));
+            core.setOutput('total-duration', totalDurationMs > 0 ? formatDurationIndex(totalDurationMs) : '');
+            const globalSlowest = allTimings.reduce((best, t) => {
+                if (t.slowestStep && t.slowestStep.durationMs > best.ms)
+                    return { name: t.slowestStep.name, ms: t.slowestStep.durationMs };
+                return best;
+            }, { name: '', ms: 0 });
+            core.setOutput('slowest-step', globalSlowest.name);
+            core.setOutput('test-summary', allTestSummary ? JSON.stringify(allTestSummary) : '');
+            core.setOutput('run-attempt', String(runAttempt));
+            core.setOutput('run-number', String(runNumber));
+            core.setOutput('trigger-event', triggerEvent);
             core.info('Action Log Analyzer complete.');
             return;
         }
@@ -31216,9 +31564,21 @@ async function run() {
                 return true;
             }).slice(0, 40);
             const jobClonedRepos = (0, analyzer_1.extractClonedRepos)(logLines);
+            const jobTiming = (0, analyzer_1.computeJobTiming)(job);
+            const jobTestSummary = (0, analyzer_1.extractTestResults)(logLines);
+            const jobAnnotations = (0, analyzer_1.extractAnnotations)(logLines);
             core.info(`Root cause: ${analysis.rootCause}`);
             core.info(`Category: ${analysis.category}`);
             core.info(`Matched pattern: ${analysis.matchedPattern}`);
+            if (jobTiming.jobDurationMs > 0) {
+                core.info(`Job duration: ${formatDurationIndex(jobTiming.jobDurationMs)}${jobTiming.slowestStep ? `, slowest step: ${jobTiming.slowestStep.name}` : ''}`);
+            }
+            if (jobTestSummary) {
+                core.info(`Test results: ${jobTestSummary.passed} passed, ${jobTestSummary.failed} failed (${jobTestSummary.framework})`);
+            }
+            if (jobAnnotations.length > 0) {
+                core.info(`Collected ${jobAnnotations.length} annotation(s)`);
+            }
             if (jobGitRefs.length > 0) {
                 core.info(`Detected ${jobGitRefs.length} action/docker reference(s)`);
             }
@@ -31233,15 +31593,20 @@ async function run() {
             core.setOutput('warning-count', String(analysis.warningLines.length));
             core.setOutput('build-params', JSON.stringify(analysis.buildParams));
             core.setOutput('git-refs', JSON.stringify(jobGitRefs));
+            core.setOutput('total-duration', jobTiming.jobDurationMs > 0 ? formatDurationIndex(jobTiming.jobDurationMs) : '');
+            core.setOutput('slowest-step', jobTiming.slowestStep?.name ?? '');
+            core.setOutput('test-summary', jobTestSummary ? JSON.stringify(jobTestSummary) : '');
+            core.setOutput('run-attempt', String(runAttempt));
+            core.setOutput('run-number', String(runNumber));
+            core.setOutput('trigger-event', triggerEvent);
             if (postSummary) {
-                const summary = (0, formatter_1.formatJobSummary)(analysis, job.name, runUrl, job.steps ?? [], triggeredBy, branch, commit, repoFullName, artifacts, extractedLinks, jobGitRefs, jobClonedRepos);
+                const summary = (0, formatter_1.formatJobSummary)(analysis, job.name, runUrl, job.steps ?? [], triggeredBy, branch, commit, repoFullName, artifacts, extractedLinks, jobGitRefs, jobClonedRepos, jobTiming, jobTestSummary, jobAnnotations, runAttempt, runNumber, triggerEvent, workflowName);
                 await core.summary.addRaw(summary).write();
                 core.info('Job summary posted.');
             }
-            // Post PR comment
             if (postComment && context.payload.pull_request) {
                 const prNumber = context.payload.pull_request.number;
-                const comment = (0, formatter_1.formatPRComment)(analysis, job.name, runUrl, job.steps ?? [], repoFullName, branch, commit, artifacts, extractedLinks, jobGitRefs, jobClonedRepos);
+                const comment = (0, formatter_1.formatPRComment)(analysis, job.name, runUrl, job.steps ?? [], repoFullName, branch, commit, artifacts, extractedLinks, jobGitRefs, jobClonedRepos, jobTiming, jobTestSummary, jobAnnotations, runAttempt, runNumber, triggerEvent, workflowName);
                 const { data: comments } = await octokit.rest.issues.listComments({
                     owner, repo, issue_number: prNumber
                 });
