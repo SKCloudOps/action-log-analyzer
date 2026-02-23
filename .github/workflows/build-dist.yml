@@ -1,0 +1,53 @@
+name: Build & Commit dist
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'package.json'
+      - 'tsconfig.json'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # Required to push the dist/ folder back
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Build dist
+        run: npm run build
+
+      - name: Commit and push dist
+        run: |
+          git config user.name "sathishbot"
+          git config user.email "sathishkrcs@gmail.com"
+          git add dist/
+          # Only commit if there are changes
+          if git diff --staged --quiet; then
+            echo "No changes to dist/ — skipping commit."
+          else
+            git commit -m "ci: auto-build dist [skip ci]"
+            git push
+          fi
+
+      - name: Update v1 tag
+        run: |
+          git config user.name "sathishbot"
+          git config user.email "sathishkrcs@gmail.com"
+          git tag -fa v1 -m "Update v1 tag to latest"
+          git push origin v1 --force
