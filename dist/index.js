@@ -30103,6 +30103,11 @@ const SEVERITY_LABEL = {
     warning: 'Warning',
     info: 'Info'
 };
+const SEVERITY_EMOJI = {
+    critical: '🔴',
+    warning: '🟡',
+    info: '🔵'
+};
 function formatPRComment(analysis, jobName, runUrl) {
     const label = SEVERITY_LABEL[analysis.severity];
     const exactMatchBlock = analysis.exactMatchLine
@@ -30114,7 +30119,7 @@ ${analysis.exactMatchLine}
     const errorBlock = analysis.errorLines.length > 0
         ? `\n<details>\n<summary>View ${analysis.errorLines.length} detected error line${analysis.errorLines.length === 1 ? '' : 's'}</summary>\n\n\`\`\`text\n${analysis.errorLines.join('\n')}\n\`\`\`\n</details>`
         : '';
-    return `## Pipeline Failure Analysis
+    return `## Log Analyzer Report
 
 | | |
 |:--|:--|
@@ -30138,18 +30143,19 @@ ${errorBlock}
 }
 function formatJobSummary(analysis, jobName, runUrl, steps, triggeredBy, branch, commit, repo) {
     const label = SEVERITY_LABEL[analysis.severity];
+    const emoji = SEVERITY_EMOJI[analysis.severity];
     const now = new Date().toUTCString();
     // Step breakdown
     const stepRows = steps.map(step => {
-        const icon = step.conclusion === 'success' ? 'ok' :
-            step.conclusion === 'failure' ? 'fail' :
-                step.conclusion === 'skipped' ? 'skip' :
-                    step.conclusion === 'cancelled' ? 'cancel' : '--';
+        const icon = step.conclusion === 'success' ? '✅' :
+            step.conclusion === 'failure' ? '❌' :
+                step.conclusion === 'skipped' ? '⏭️' :
+                    step.conclusion === 'cancelled' ? '🚫' : '⏳';
         const duration = step.started_at && step.completed_at
             ? `${Math.round((new Date(step.completed_at).getTime() - new Date(step.started_at).getTime()) / 1000)}s`
             : '—';
         const isFailedStep = step.name === analysis.failedStep
-            ? ' *(failed)*'
+            ? ' (failed)'
             : '';
         return `| ${icon} | \`${step.name}\` | ${step.conclusion ?? 'in progress'} | ${duration} |${isFailedStep}`;
     }).join('\n');
@@ -30158,7 +30164,8 @@ function formatJobSummary(analysis, jobName, runUrl, steps, triggeredBy, branch,
         .slice(0, 10)
         .join('\n');
     const patternMeta = `Pattern: \`${analysis.matchedPattern}\` · Category: \`${analysis.category}\``;
-    return `# Pipeline Failure Report
+    const exactMatchLine = analysis.exactMatchLine || 'No exact match found';
+    return `# Log Analyzer Report
 
 ## Summary
 
@@ -30169,7 +30176,7 @@ function formatJobSummary(analysis, jobName, runUrl, steps, triggeredBy, branch,
 | Commit | [\`${commit.substring(0, 7)}\`](https://github.com/${repo}/commit/${commit}) |
 | Triggered by | \`${triggeredBy}\` |
 | Job | \`${jobName}\` |
-| Severity | ${label} |
+| Severity | ${emoji} ${label} |
 | Log lines scanned | ${analysis.totalLines.toLocaleString()} |
 | Analyzed | ${now} |
 
@@ -30182,14 +30189,10 @@ function formatJobSummary(analysis, jobName, runUrl, steps, triggeredBy, branch,
 **Failed Step:** \`${analysis.failedStep}\`
 
 ### Error Output
+${analysis.exactMatchLineNumber > 0 ? ` *(line ${analysis.exactMatchLineNumber} of ${analysis.totalLines.toLocaleString()})*` : ''}
 
-${analysis.exactMatchLineNumber > 0
-        ? `Line ${analysis.exactMatchLineNumber} of ${analysis.totalLines.toLocaleString()}:`
-        : 'Detected error:'}
-
-\`\`\`text
-${analysis.exactMatchLine || 'No exact match found'}
-\`\`\`
+> [!DANGER]
+> ${exactMatchLine}
 
 > [!TIP]
 > **Suggested Fix**
@@ -30208,7 +30211,10 @@ ${stepRows}
 ## Error Lines (showing 10 of ${analysis.errorLines.length})
 
 \`\`\`text
-${topErrorLines || 'No error lines captured'}
+${topErrorLines ? topErrorLines.split('\n').map((line, i) => {
+        const isExactMatch = line === analysis.exactMatchLine;
+        return isExactMatch ? `>>> ${line}` : line;
+    }).join('\n') : 'No error lines captured'}
 \`\`\`
 
 ---
@@ -30217,10 +30223,10 @@ ${topErrorLines || 'No error lines captured'}
 
 | Action | |
 |:-------|:--|
-| View workflow run | [Open logs](${runUrl}) |
-| Add custom pattern | [patterns.json](https://github.com/${repo}/blob/main/patterns.json) |
-| Report issue | [Open issue](https://github.com/SKCloudOps/action-log-analyzer/issues) |
-| Documentation | [README](https://github.com/SKCloudOps/action-log-analyzer#readme) |
+| 🔗 View workflow run | [Open logs](${runUrl}) |
+| 📋 Add custom pattern | [patterns.json](https://github.com/${repo}/blob/main/patterns.json) |
+| 🐛 Report issue | [Open issue](https://github.com/SKCloudOps/action-log-analyzer/issues) |
+| 📖 Documentation | [README](https://github.com/SKCloudOps/action-log-analyzer#readme) |
 
 ---
 *Action Log Analyzer · ${now}*`;
@@ -30346,7 +30352,7 @@ async function run() {
                 const { data: comments } = await octokit.rest.issues.listComments({
                     owner, repo, issue_number: prNumber
                 });
-                const existingComment = comments.find(c => c.body?.includes('Pipeline Failure Analysis') &&
+                const existingComment = comments.find(c => c.body?.includes('Log Analyzer Report') &&
                     c.body?.includes(job.name));
                 if (existingComment) {
                     await octokit.rest.issues.updateComment({
