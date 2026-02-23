@@ -30243,7 +30243,35 @@ const SEVERITY_EMOJI = {
     warning: '🟡',
     info: '🔵'
 };
-function formatPRComment(analysis, jobName, runUrl, steps, repo, branch, commit) {
+function formatBytes(bytes) {
+    if (bytes < 1024)
+        return `${bytes} B`;
+    if (bytes < 1024 * 1024)
+        return `${Math.round(bytes / 1024)} KB`;
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+function buildArtifactsAndLinksSection(runUrl, artifacts, extractedLinks, repo) {
+    const parts = [];
+    parts.push(`| Link | Description |
+|:-----|:------------|
+| [View workflow run](${runUrl}) | Full logs & artifact downloads |`);
+    if (artifacts.length > 0) {
+        for (const a of artifacts) {
+            parts.push(`| [\`${a.name}\`](${runUrl}) | Artifact · ${formatBytes(a.size_in_bytes)} |`);
+        }
+    }
+    if (extractedLinks.length > 0) {
+        for (const { url, label } of extractedLinks) {
+            const display = label || 'Extracted link';
+            const shortUrl = url.length > 55 ? url.slice(0, 52) + '…' : url;
+            parts.push(`| [${display}](${url}) | ${shortUrl} |`);
+        }
+    }
+    parts.push(`| [Add custom pattern](https://github.com/${repo}/blob/main/patterns.json) | patterns.json |`);
+    parts.push(`| [Report issue](https://github.com/SKCloudOps/action-log-analyzer/issues) | Action Log Analyzer |`);
+    return parts.join('\n');
+}
+function formatPRComment(analysis, jobName, runUrl, steps, repo, branch, commit, artifacts = [], extractedLinks = []) {
     const passedCount = steps.filter(s => s.conclusion === 'success').length;
     const totalCount = steps.length;
     const stepBar = steps.map(s => s.conclusion === 'success' ? '🟢' :
@@ -30291,10 +30319,13 @@ ${exactMatchLine}
 ${analysis.suggestion}${docsLink}
 ${errorBlock}
 
+### Artifacts & Links
+${buildArtifactsAndLinksSection(runUrl, artifacts, extractedLinks, repo)}
+
 ---
-[View full workflow run](${runUrl}) · [Action Log Analyzer](https://github.com/SKCloudOps/action-log-analyzer) · [Report issue](https://github.com/SKCloudOps/action-log-analyzer/issues)`;
+*[Action Log Analyzer](https://github.com/SKCloudOps/action-log-analyzer)*`;
 }
-function formatJobSummary(analysis, jobName, runUrl, steps, triggeredBy, branch, commit, repo) {
+function formatJobSummary(analysis, jobName, runUrl, steps, triggeredBy, branch, commit, repo, artifacts = [], extractedLinks = []) {
     const label = SEVERITY_LABEL[analysis.severity];
     const emoji = SEVERITY_EMOJI[analysis.severity];
     const now = new Date().toUTCString();
@@ -30350,12 +30381,13 @@ ${buildGroupedErrorBlockSummary(analysis.errorLinesByCategory || {}, analysis.ex
 
 ---
 
-[View full workflow run](${runUrl}) · [Add custom pattern](https://github.com/${repo}/blob/main/patterns.json) · [Report issue](https://github.com/SKCloudOps/action-log-analyzer/issues)
+## Artifacts & Links
+${buildArtifactsAndLinksSection(runUrl, artifacts, extractedLinks, repo)}
 
 ---
 *Action Log Analyzer · ${now}*`;
 }
-function formatSuccessSummary(runUrl, jobs, triggeredBy, branch, commit, repo) {
+function formatSuccessSummary(runUrl, jobs, triggeredBy, branch, commit, repo, artifacts = [], extractedLinks = []) {
     const now = new Date().toUTCString();
     const jobRows = jobs.map(job => {
         const icon = job.conclusion === 'success' ? '✅' : job.conclusion === 'failure' ? '❌' : '⏳';
@@ -30376,18 +30408,35 @@ ${jobRows}
 | Commit | [\`${commit.substring(0, 7)}\`](https://github.com/${repo}/commit/${commit}) |
 | Triggered by | \`${triggeredBy}\` |
 
-[View workflow run](${runUrl})
+### Artifacts & Links
+${buildArtifactsAndLinksSection(runUrl, artifacts, extractedLinks, repo)}
 
 ---
 *Action Log Analyzer · ${now}*`;
 }
-function formatSuccessPRComment(jobNames, runUrl) {
+function formatSuccessPRComment(jobNames, runUrl, artifacts = [], extractedLinks = []) {
     const jobsList = jobNames.map(n => `\`${n}\``).join(', ');
+    let extra = `\n\n[View workflow run](${runUrl})`;
+    if (artifacts.length > 0 || extractedLinks.length > 0) {
+        const parts = [];
+        if (artifacts.length > 0) {
+            parts.push(`**Artifacts:** ${artifacts.map(a => `\`${a.name}\` (${Math.round(a.size_in_bytes / 1024)} KB)`).join(', ')}`);
+        }
+        if (extractedLinks.length > 0) {
+            const coverage = extractedLinks.filter(l => l.label === 'Coverage report');
+            if (coverage.length > 0) {
+                parts.push(`**Coverage:** ${coverage.map(l => `[${l.label}](${l.url})`).join(', ')}`);
+            }
+            const other = extractedLinks.filter(l => !l.label || l.label !== 'Coverage report');
+            if (other.length > 0) {
+                parts.push(`**Links:** ${other.slice(0, 5).map(l => `[${l.label || 'link'}](${l.url})`).join(', ')}`);
+            }
+        }
+        extra = `\n\n${parts.join('\n\n')}\n\n[View workflow run & download](${runUrl})`;
+    }
     return `## Log Analyzer Report
 
-All jobs completed successfully: ${jobsList}
-
-[View workflow run](${runUrl})
+All jobs completed successfully: ${jobsList}${extra}
 
 ---
 *[Action Log Analyzer](https://github.com/SKCloudOps/action-log-analyzer) · [Report issue](https://github.com/SKCloudOps/action-log-analyzer/issues)*`;
@@ -30439,6 +30488,22 @@ const core = __importStar(__nccwpck_require__(7484));
 const github = __importStar(__nccwpck_require__(3228));
 const analyzer_1 = __nccwpck_require__(8561);
 const formatter_1 = __nccwpck_require__(1845);
+function extractLinksFromLogs(logs) {
+    const urlRegex = /https?:\/\/[^\s\)\]\>"\']+/g;
+    const found = new Set();
+    const links = [];
+    for (const match of logs.matchAll(urlRegex)) {
+        let url = match[0].replace(/[.,;:!?]+$/, '');
+        if (url.length > 10 && url.length < 500 && !found.has(url)) {
+            found.add(url);
+            const label = url.includes('coverage') ? 'Coverage report' :
+                url.includes('test') || url.includes('report') ? 'Test/report' :
+                    url.includes('github.com') ? 'GitHub' : undefined;
+            links.push({ url, label });
+        }
+    }
+    return links.slice(0, 15); // limit to 15
+}
 async function run() {
     try {
         const token = core.getInput('github-token', { required: true });
@@ -30455,6 +30520,18 @@ async function run() {
         const runId = context.runId;
         const runUrl = `https://github.com/${owner}/${repo}/actions/runs/${runId}`;
         const branch = context.ref.replace('refs/heads/', '');
+        let artifacts = [];
+        try {
+            const { data: artifactsData } = await octokit.rest.actions.listWorkflowRunArtifacts({
+                owner, repo, run_id: runId
+            });
+            artifacts = (artifactsData.artifacts || [])
+                .filter(a => !a.expired)
+                .map(a => ({ name: a.name, size_in_bytes: a.size_in_bytes, url: a.url }));
+        }
+        catch (err) {
+            core.warning(`Could not fetch artifacts: ${err}`);
+        }
         const commit = context.sha;
         const triggeredBy = context.actor;
         const repoFullName = `${owner}/${repo}`;
@@ -30469,15 +30546,39 @@ async function run() {
         });
         if (failedJobs.length === 0) {
             core.info('No failed jobs. Posting success summary.');
+            // Only show completed jobs (exclude in-progress e.g. analyze-logs itself)
+            const completedJobs = jobsData.jobs.filter(j => j.conclusion != null);
+            // Fetch logs from successful jobs to extract coverage/links
+            let extractedLinks = [];
+            const successfulJobs = jobsData.jobs.filter(j => j.conclusion === 'success');
+            for (const job of successfulJobs.slice(0, 3)) {
+                try {
+                    const logsResponse = await octokit.rest.actions.downloadJobLogsForWorkflowRun({
+                        owner, repo, job_id: job.id
+                    });
+                    const logs = logsResponse.data;
+                    extractedLinks = [...extractedLinks, ...extractLinksFromLogs(logs)];
+                    const seen = new Set();
+                    extractedLinks = extractedLinks.filter(l => {
+                        if (seen.has(l.url))
+                            return false;
+                        seen.add(l.url);
+                        return true;
+                    }).slice(0, 15);
+                }
+                catch {
+                    /* skip if logs unavailable */
+                }
+            }
             if (postSummary) {
-                const successSummary = (0, formatter_1.formatSuccessSummary)(runUrl, jobsData.jobs, triggeredBy, branch, commit, repoFullName);
+                const successSummary = (0, formatter_1.formatSuccessSummary)(runUrl, completedJobs, triggeredBy, branch, commit, repoFullName, artifacts, extractedLinks);
                 await core.summary.addRaw(successSummary).write();
                 core.info('Success summary posted.');
             }
             if (postComment && context.payload.pull_request) {
                 const prNumber = context.payload.pull_request.number;
-                const jobNames = jobsData.jobs.map(j => j.name);
-                const comment = (0, formatter_1.formatSuccessPRComment)(jobNames, runUrl);
+                const jobNames = completedJobs.map(j => j.name);
+                const comment = (0, formatter_1.formatSuccessPRComment)(jobNames, runUrl, artifacts, extractedLinks);
                 const { data: comments } = await octokit.rest.issues.listComments({
                     owner, repo, issue_number: prNumber
                 });
@@ -30524,6 +30625,8 @@ async function run() {
             const failedStep = job.steps?.find(s => s.conclusion === 'failure')?.name;
             // Analyze using pattern matching
             const analysis = await (0, analyzer_1.analyzeLogs)(logs, patterns, failedStep);
+            // Extract notable URLs from logs (coverage, test results, reports, etc.)
+            const extractedLinks = extractLinksFromLogs(logs);
             core.info(`Root cause: ${analysis.rootCause}`);
             core.info(`Category: ${analysis.category}`);
             core.info(`Matched pattern: ${analysis.matchedPattern}`);
@@ -30535,14 +30638,14 @@ async function run() {
             core.setOutput('category', analysis.category);
             // Post job summary
             if (postSummary) {
-                const summary = (0, formatter_1.formatJobSummary)(analysis, job.name, runUrl, job.steps ?? [], triggeredBy, branch, commit, repoFullName);
+                const summary = (0, formatter_1.formatJobSummary)(analysis, job.name, runUrl, job.steps ?? [], triggeredBy, branch, commit, repoFullName, artifacts, extractedLinks);
                 await core.summary.addRaw(summary).write();
                 core.info('Job summary posted.');
             }
             // Post PR comment
             if (postComment && context.payload.pull_request) {
                 const prNumber = context.payload.pull_request.number;
-                const comment = (0, formatter_1.formatPRComment)(analysis, job.name, runUrl, job.steps ?? [], repoFullName, branch, commit);
+                const comment = (0, formatter_1.formatPRComment)(analysis, job.name, runUrl, job.steps ?? [], repoFullName, branch, commit, artifacts, extractedLinks);
                 const { data: comments } = await octokit.rest.issues.listComments({
                     owner, repo, issue_number: prNumber
                 });

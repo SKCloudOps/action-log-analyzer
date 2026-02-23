@@ -106,7 +106,35 @@ const SEVERITY_EMOJI = {
     warning: '🟡',
     info: '🔵'
 };
-function formatPRComment(analysis, jobName, runUrl, steps, repo, branch, commit) {
+function formatBytes(bytes) {
+    if (bytes < 1024)
+        return `${bytes} B`;
+    if (bytes < 1024 * 1024)
+        return `${Math.round(bytes / 1024)} KB`;
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+function buildArtifactsAndLinksSection(runUrl, artifacts, extractedLinks, repo) {
+    const parts = [];
+    parts.push(`| Link | Description |
+|:-----|:------------|
+| [View workflow run](${runUrl}) | Full logs & artifact downloads |`);
+    if (artifacts.length > 0) {
+        for (const a of artifacts) {
+            parts.push(`| [\`${a.name}\`](${runUrl}) | Artifact · ${formatBytes(a.size_in_bytes)} |`);
+        }
+    }
+    if (extractedLinks.length > 0) {
+        for (const { url, label } of extractedLinks) {
+            const display = label || 'Extracted link';
+            const shortUrl = url.length > 55 ? url.slice(0, 52) + '…' : url;
+            parts.push(`| [${display}](${url}) | ${shortUrl} |`);
+        }
+    }
+    parts.push(`| [Add custom pattern](https://github.com/${repo}/blob/main/patterns.json) | patterns.json |`);
+    parts.push(`| [Report issue](https://github.com/SKCloudOps/action-log-analyzer/issues) | Action Log Analyzer |`);
+    return parts.join('\n');
+}
+function formatPRComment(analysis, jobName, runUrl, steps, repo, branch, commit, artifacts = [], extractedLinks = []) {
     const passedCount = steps.filter(s => s.conclusion === 'success').length;
     const totalCount = steps.length;
     const stepBar = steps.map(s => s.conclusion === 'success' ? '🟢' :
@@ -154,10 +182,13 @@ ${exactMatchLine}
 ${analysis.suggestion}${docsLink}
 ${errorBlock}
 
+### Artifacts & Links
+${buildArtifactsAndLinksSection(runUrl, artifacts, extractedLinks, repo)}
+
 ---
-[View full workflow run](${runUrl}) · [Action Log Analyzer](https://github.com/SKCloudOps/action-log-analyzer) · [Report issue](https://github.com/SKCloudOps/action-log-analyzer/issues)`;
+*[Action Log Analyzer](https://github.com/SKCloudOps/action-log-analyzer)*`;
 }
-function formatJobSummary(analysis, jobName, runUrl, steps, triggeredBy, branch, commit, repo) {
+function formatJobSummary(analysis, jobName, runUrl, steps, triggeredBy, branch, commit, repo, artifacts = [], extractedLinks = []) {
     const label = SEVERITY_LABEL[analysis.severity];
     const emoji = SEVERITY_EMOJI[analysis.severity];
     const now = new Date().toUTCString();
@@ -213,12 +244,13 @@ ${buildGroupedErrorBlockSummary(analysis.errorLinesByCategory || {}, analysis.ex
 
 ---
 
-[View full workflow run](${runUrl}) · [Add custom pattern](https://github.com/${repo}/blob/main/patterns.json) · [Report issue](https://github.com/SKCloudOps/action-log-analyzer/issues)
+## Artifacts & Links
+${buildArtifactsAndLinksSection(runUrl, artifacts, extractedLinks, repo)}
 
 ---
 *Action Log Analyzer · ${now}*`;
 }
-function formatSuccessSummary(runUrl, jobs, triggeredBy, branch, commit, repo) {
+function formatSuccessSummary(runUrl, jobs, triggeredBy, branch, commit, repo, artifacts = [], extractedLinks = []) {
     const now = new Date().toUTCString();
     const jobRows = jobs.map(job => {
         const icon = job.conclusion === 'success' ? '✅' : job.conclusion === 'failure' ? '❌' : '⏳';
@@ -239,18 +271,35 @@ ${jobRows}
 | Commit | [\`${commit.substring(0, 7)}\`](https://github.com/${repo}/commit/${commit}) |
 | Triggered by | \`${triggeredBy}\` |
 
-[View workflow run](${runUrl})
+### Artifacts & Links
+${buildArtifactsAndLinksSection(runUrl, artifacts, extractedLinks, repo)}
 
 ---
 *Action Log Analyzer · ${now}*`;
 }
-function formatSuccessPRComment(jobNames, runUrl) {
+function formatSuccessPRComment(jobNames, runUrl, artifacts = [], extractedLinks = []) {
     const jobsList = jobNames.map(n => `\`${n}\``).join(', ');
+    let extra = `\n\n[View workflow run](${runUrl})`;
+    if (artifacts.length > 0 || extractedLinks.length > 0) {
+        const parts = [];
+        if (artifacts.length > 0) {
+            parts.push(`**Artifacts:** ${artifacts.map(a => `\`${a.name}\` (${Math.round(a.size_in_bytes / 1024)} KB)`).join(', ')}`);
+        }
+        if (extractedLinks.length > 0) {
+            const coverage = extractedLinks.filter(l => l.label === 'Coverage report');
+            if (coverage.length > 0) {
+                parts.push(`**Coverage:** ${coverage.map(l => `[${l.label}](${l.url})`).join(', ')}`);
+            }
+            const other = extractedLinks.filter(l => !l.label || l.label !== 'Coverage report');
+            if (other.length > 0) {
+                parts.push(`**Links:** ${other.slice(0, 5).map(l => `[${l.label || 'link'}](${l.url})`).join(', ')}`);
+            }
+        }
+        extra = `\n\n${parts.join('\n\n')}\n\n[View workflow run & download](${runUrl})`;
+    }
     return `## Log Analyzer Report
 
-All jobs completed successfully: ${jobsList}
-
-[View workflow run](${runUrl})
+All jobs completed successfully: ${jobsList}${extra}
 
 ---
 *[Action Log Analyzer](https://github.com/SKCloudOps/action-log-analyzer) · [Report issue](https://github.com/SKCloudOps/action-log-analyzer/issues)*`;
