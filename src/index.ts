@@ -1,7 +1,7 @@
 import * as core from '@actions/core'
 import * as github from '@actions/github'
 import { loadPatterns, analyzeLogs } from './analyzer'
-import { formatPRComment, formatJobSummary } from './formatter'
+import { formatPRComment, formatJobSummary, formatSuccessSummary, formatSuccessPRComment } from './formatter'
 
 async function run(): Promise<void> {
   try {
@@ -38,7 +38,54 @@ async function run(): Promise<void> {
     })
 
     if (failedJobs.length === 0) {
-      core.info('No failed jobs found. Nothing to analyze.')
+      core.info('No failed jobs. Posting success summary.')
+
+      if (postSummary) {
+        const successSummary = formatSuccessSummary(
+          runUrl,
+          jobsData.jobs,
+          triggeredBy,
+          branch,
+          commit,
+          repoFullName
+        )
+        await core.summary.addRaw(successSummary).write()
+        core.info('Success summary posted.')
+      }
+
+      if (postComment && context.payload.pull_request) {
+        const prNumber = context.payload.pull_request.number
+        const jobNames = jobsData.jobs.map(j => j.name)
+        const comment = formatSuccessPRComment(jobNames, runUrl)
+
+        const { data: comments } = await octokit.rest.issues.listComments({
+          owner, repo, issue_number: prNumber
+        })
+
+        const existingComment = comments.find(c =>
+          c.body?.includes('Log Analyzer Report') &&
+          c.body?.includes('All jobs completed successfully')
+        )
+
+        if (existingComment) {
+          await octokit.rest.issues.updateComment({
+            owner, repo, comment_id: existingComment.id, body: comment
+          })
+          core.info('Updated existing PR comment.')
+        } else {
+          await octokit.rest.issues.createComment({
+            owner, repo, issue_number: prNumber, body: comment
+          })
+          core.info('Posted PR comment.')
+        }
+      }
+
+      core.setOutput('root-cause', '')
+      core.setOutput('failed-step', '')
+      core.setOutput('suggestion', '')
+      core.setOutput('matched-pattern', 'none')
+      core.setOutput('category', 'Success')
+      core.info('Action Log Analyzer complete.')
       return
     }
 
@@ -90,7 +137,10 @@ async function run(): Promise<void> {
       // Post PR comment
       if (postComment && context.payload.pull_request) {
         const prNumber = context.payload.pull_request.number
-        const comment = formatPRComment(analysis, job.name, runUrl)
+        const comment = formatPRComment(
+          analysis, job.name, runUrl,
+          job.steps ?? [], repoFullName, branch, commit
+        )
 
         const { data: comments } = await octokit.rest.issues.listComments({
           owner, repo, issue_number: prNumber
