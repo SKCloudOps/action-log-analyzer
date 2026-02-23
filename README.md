@@ -150,6 +150,7 @@ Each pattern needs:
 - `suggestion` — 2-3 sentences on how to fix it
 - `severity` — `critical`, `warning`, or `info`
 - `tags` — array of searchable tags
+- `docsUrl` — (optional) link to related documentation shown in the report
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for full details.
 

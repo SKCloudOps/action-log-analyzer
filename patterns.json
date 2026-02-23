@@ -33,6 +33,7 @@
       "flags": "i",
       "rootCause": "Docker registry authentication failed — incorrect username or password",
       "suggestion": "Check your DOCKER_USERNAME and DOCKER_PASSWORD secrets in Settings → Secrets → Actions. Make sure they are not expired.",
+      "docsUrl": "https://docs.docker.com/engine/reference/commandline/login/",
       "severity": "critical",
       "tags": [
         "docker",
@@ -60,6 +61,7 @@
       "flags": "i",
       "rootCause": "Docker image or tag not found in registry",
       "suggestion": "Verify the image name and tag exist in your registry. Check for typos in your image reference.",
+      "docsUrl": "https://docs.docker.com/engine/reference/commandline/pull/",
       "severity": "critical",
       "tags": [
         "docker",

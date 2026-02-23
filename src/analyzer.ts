@@ -7,12 +7,16 @@ export interface FailureAnalysis {
   failedStep: string
   suggestion: string
   errorLines: string[]
+  errorLinesByCategory: Record<string, string[]>  // errors grouped by category
   exactMatchLine: string     // the exact line that triggered the pattern
   exactMatchLineNumber: number  // line number in original log
+  contextBefore: string[]    // up to 2 lines before the error
+  contextAfter: string[]     // up to 2 lines after the error
   totalLines: number         // total lines in log
   severity: 'critical' | 'warning' | 'info'
   matchedPattern: string
   category: string
+  docsUrl?: string           // optional documentation link from pattern
 }
 
 interface ErrorPattern {
@@ -24,6 +28,7 @@ interface ErrorPattern {
   suggestion: string
   severity: 'critical' | 'warning' | 'info'
   tags: string[]
+  docsUrl?: string
 }
 
 interface PatternsFile {
@@ -92,6 +97,33 @@ export async function loadPatterns(remoteUrl?: string): Promise<ErrorPattern[]> 
   return local
 }
 
+function categorizeErrorLines(errorLines: string[], patterns: ErrorPattern[]): Record<string, string[]> {
+  const byCategory: Record<string, string[]> = {}
+  for (const line of errorLines) {
+    let assigned = false
+    for (const p of patterns) {
+      try {
+        const regex = new RegExp(p.pattern, p.flags)
+        if (regex.test(line)) {
+          const cat = p.category
+          if (!byCategory[cat]) byCategory[cat] = []
+          byCategory[cat].push(line)
+          assigned = true
+          break
+        }
+      } catch {
+        /* skip invalid regex */
+      }
+    }
+    if (!assigned) {
+      const cat = 'Other'
+      if (!byCategory[cat]) byCategory[cat] = []
+      byCategory[cat].push(line)
+    }
+  }
+  return byCategory
+}
+
 function extractFailedStep(lines: string[]): string | null {
   for (const line of lines) {
     const clean = cleanLine(line)
@@ -132,30 +164,42 @@ export async function analyzeLogs(
       if (cleaned.length === 0) continue
       if (regex.test(cleaned)) {
         core.info(`Matched pattern: ${p.id} (${p.category}) at line ${lineNumber}`)
+        const idx = cleanedLines.findIndex(c => c.lineNumber === lineNumber)
+        const contextBefore = idx >= 0 ? cleanedLines.slice(Math.max(0, idx - 2), idx).map(c => c.cleaned).filter(Boolean) : []
+        const contextAfter = idx >= 0 ? cleanedLines.slice(idx + 1, Math.min(cleanedLines.length, idx + 3)).map(c => c.cleaned).filter(Boolean) : []
+        const errorLinesByCategory = categorizeErrorLines(errorLines, patterns)
         return {
           rootCause: p.rootCause,
           failedStep: stepName || extractFailedStep(rawLines) || 'Unknown step',
           suggestion: p.suggestion,
           errorLines,
+          errorLinesByCategory,
           exactMatchLine: cleaned,
           exactMatchLineNumber: lineNumber,
+          contextBefore,
+          contextAfter,
           totalLines,
           severity: p.severity,
           matchedPattern: p.id,
-          category: p.category
+          category: p.category,
+          docsUrl: p.docsUrl
         }
       }
     }
   }
 
   // No pattern matched — generic fallback
+  const errorLinesByCategory = categorizeErrorLines(errorLines, patterns)
   return {
     rootCause: 'Unknown failure — could not automatically detect root cause',
     failedStep: stepName || extractFailedStep(rawLines) || 'Unknown step',
     suggestion: 'Review the error lines below. Consider adding a custom pattern to patterns.json to handle this error in future runs.',
     errorLines,
+    errorLinesByCategory,
     exactMatchLine: errorLines[0] || '',
     exactMatchLineNumber: 0,
+    contextBefore: [],
+    contextAfter: errorLines.slice(1, 3),
     totalLines,
     severity: 'warning',
     matchedPattern: 'none',
