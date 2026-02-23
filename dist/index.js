@@ -30024,6 +30024,35 @@ async function loadPatterns(remoteUrl) {
     }
     return local;
 }
+function categorizeErrorLines(errorLines, patterns) {
+    const byCategory = {};
+    for (const line of errorLines) {
+        let assigned = false;
+        for (const p of patterns) {
+            try {
+                const regex = new RegExp(p.pattern, p.flags);
+                if (regex.test(line)) {
+                    const cat = p.category;
+                    if (!byCategory[cat])
+                        byCategory[cat] = [];
+                    byCategory[cat].push(line);
+                    assigned = true;
+                    break;
+                }
+            }
+            catch {
+                /* skip invalid regex */
+            }
+        }
+        if (!assigned) {
+            const cat = 'Other';
+            if (!byCategory[cat])
+                byCategory[cat] = [];
+            byCategory[cat].push(line);
+        }
+    }
+    return byCategory;
+}
 function extractFailedStep(lines) {
     for (const line of lines) {
         const clean = cleanLine(line);
@@ -30057,29 +30086,41 @@ async function analyzeLogs(logs, patterns, stepName) {
                 continue;
             if (regex.test(cleaned)) {
                 core.info(`Matched pattern: ${p.id} (${p.category}) at line ${lineNumber}`);
+                const idx = cleanedLines.findIndex(c => c.lineNumber === lineNumber);
+                const contextBefore = idx >= 0 ? cleanedLines.slice(Math.max(0, idx - 2), idx).map(c => c.cleaned).filter(Boolean) : [];
+                const contextAfter = idx >= 0 ? cleanedLines.slice(idx + 1, Math.min(cleanedLines.length, idx + 3)).map(c => c.cleaned).filter(Boolean) : [];
+                const errorLinesByCategory = categorizeErrorLines(errorLines, patterns);
                 return {
                     rootCause: p.rootCause,
                     failedStep: stepName || extractFailedStep(rawLines) || 'Unknown step',
                     suggestion: p.suggestion,
                     errorLines,
+                    errorLinesByCategory,
                     exactMatchLine: cleaned,
                     exactMatchLineNumber: lineNumber,
+                    contextBefore,
+                    contextAfter,
                     totalLines,
                     severity: p.severity,
                     matchedPattern: p.id,
-                    category: p.category
+                    category: p.category,
+                    docsUrl: p.docsUrl
                 };
             }
         }
     }
     // No pattern matched — generic fallback
+    const errorLinesByCategory = categorizeErrorLines(errorLines, patterns);
     return {
         rootCause: 'Unknown failure — could not automatically detect root cause',
         failedStep: stepName || extractFailedStep(rawLines) || 'Unknown step',
         suggestion: 'Review the error lines below. Consider adding a custom pattern to patterns.json to handle this error in future runs.',
         errorLines,
+        errorLinesByCategory,
         exactMatchLine: errorLines[0] || '',
         exactMatchLineNumber: 0,
+        contextBefore: [],
+        contextAfter: errorLines.slice(1, 3),
         totalLines,
         severity: 'warning',
         matchedPattern: 'none',
@@ -30098,6 +30139,90 @@ async function analyzeLogs(logs, patterns, stepName) {
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.formatPRComment = formatPRComment;
 exports.formatJobSummary = formatJobSummary;
+const MAX_ERROR_LINES = 10;
+function buildGroupedErrorBlock(errorLinesByCategory, exactMatchLine, maxLines, runUrl, totalCount) {
+    const categories = Object.keys(errorLinesByCategory).sort();
+    if (categories.length === 0)
+        return '';
+    const parts = [];
+    let linesShown = 0;
+    const truncated = totalCount > maxLines;
+    for (const cat of categories) {
+        const lines = errorLinesByCategory[cat];
+        const remaining = maxLines - linesShown;
+        const showLines = truncated ? lines.slice(0, Math.min(lines.length, Math.max(0, remaining))) : lines;
+        const hidden = lines.length - showLines.length;
+        const content = showLines
+            .map(line => (line === exactMatchLine ? `>>> ${line}` : `   ${line}`))
+            .join('\n');
+        const suffix = hidden > 0 ? `\n   ... ${hidden} more (see full log)` : '';
+        const header = hidden > 0 ? `${cat} (${showLines.length} of ${lines.length})` : `${cat} (${lines.length})`;
+        parts.push(`<details>
+<summary>${header}</summary>
+
+\`\`\`text
+${content}${suffix}
+\`\`\`
+</details>`);
+        linesShown += showLines.length;
+        if (linesShown >= maxLines && truncated)
+            break;
+    }
+    const viewFull = truncated ? `\n\n> **[View full log](${runUrl})** — ${totalCount - maxLines} more line${totalCount - maxLines === 1 ? '' : 's'} not shown` : '';
+    return `\n${parts.join('\n\n')}${viewFull}`;
+}
+function buildGroupedErrorBlockSummary(errorLinesByCategory, exactMatchLine, maxLines, runUrl, totalCount) {
+    const categories = Object.keys(errorLinesByCategory).sort();
+    if (categories.length === 0)
+        return '\n*No error lines captured*';
+    const parts = [];
+    let linesShown = 0;
+    const truncated = totalCount > maxLines;
+    for (const cat of categories) {
+        const lines = errorLinesByCategory[cat];
+        const remaining = maxLines - linesShown;
+        const showLines = truncated ? lines.slice(0, Math.min(lines.length, Math.max(0, remaining))) : lines;
+        const hidden = lines.length - showLines.length;
+        const content = showLines
+            .map(line => (line === exactMatchLine ? `>>> ${line}` : `   ${line}`))
+            .join('\n');
+        const suffix = hidden > 0 ? `\n   ... ${hidden} more` : '';
+        const header = hidden > 0 ? `${cat} (${showLines.length}/${lines.length})` : `${cat} (${lines.length})`;
+        parts.push(`<details>
+<summary>${header}</summary>
+
+\`\`\`text
+${content}${suffix}
+\`\`\`
+</details>`);
+        linesShown += showLines.length;
+        if (linesShown >= maxLines && truncated)
+            break;
+    }
+    const viewFull = truncated ? `\n\n> **[View full log](${runUrl})** — ${totalCount.toLocaleString()} lines total` : '';
+    return parts.join('\n\n') + viewFull;
+}
+function buildErrorContextBlock(analysis) {
+    const before = analysis.contextBefore || [];
+    const after = analysis.contextAfter || [];
+    const exact = analysis.exactMatchLine;
+    if (!exact && before.length === 0 && after.length === 0)
+        return '';
+    const lineRef = analysis.exactMatchLineNumber > 0 ? `*Line ${analysis.exactMatchLineNumber} of ${analysis.totalLines}*` : '';
+    const contextLines = [];
+    before.forEach(line => contextLines.push(`   ${line}`));
+    if (exact)
+        contextLines.push(`>>> ${exact}`);
+    after.forEach(line => contextLines.push(`   ${line}`));
+    return `\n#### Error Output
+${lineRef ? `${lineRef}  \n` : ''}\`\`\`text
+${contextLines.join('\n')}
+\`\`\`
+
+> [!DANGER]
+> **Error:** \`${(exact || 'No exact match').replace(/`/g, '\\`').replace(/\n/g, ' ')}\`
+`;
+}
 const SEVERITY_LABEL = {
     critical: 'Critical',
     warning: 'Warning',
@@ -30110,15 +30235,10 @@ const SEVERITY_EMOJI = {
 };
 function formatPRComment(analysis, jobName, runUrl) {
     const label = SEVERITY_LABEL[analysis.severity];
-    const exactMatchBlock = analysis.exactMatchLine
-        ? `\n#### Error Output
-${analysis.exactMatchLineNumber > 0 ? `*Line ${analysis.exactMatchLineNumber} of ${analysis.totalLines}*  \n` : ''}\`\`\`text
-${analysis.exactMatchLine}
-\`\`\``
-        : '';
-    const errorBlock = analysis.errorLines.length > 0
-        ? `\n<details>\n<summary>View ${analysis.errorLines.length} detected error line${analysis.errorLines.length === 1 ? '' : 's'}</summary>\n\n\`\`\`text\n${analysis.errorLines.join('\n')}\n\`\`\`\n</details>`
-        : '';
+    const exactMatchBlock = buildErrorContextBlock(analysis);
+    const MAX_LINES = 10;
+    const errorBlock = buildGroupedErrorBlock(analysis.errorLinesByCategory || {}, analysis.exactMatchLine, MAX_LINES, runUrl, analysis.errorLines.length);
+    const docsLink = analysis.docsUrl ? `\n\n[Related documentation](${analysis.docsUrl})` : '';
     return `## Log Analyzer Report
 
 | | |
@@ -30135,7 +30255,7 @@ ${analysis.exactMatchLine}
 
 > [!TIP]
 > **Suggested Fix**
-> ${analysis.suggestion}
+> ${analysis.suggestion}${docsLink}
 ${errorBlock}
 
 ---
@@ -30145,7 +30265,8 @@ function formatJobSummary(analysis, jobName, runUrl, steps, triggeredBy, branch,
     const label = SEVERITY_LABEL[analysis.severity];
     const emoji = SEVERITY_EMOJI[analysis.severity];
     const now = new Date().toUTCString();
-    // Step breakdown
+    // Timeline: compute offset from first step
+    const t0 = steps[0]?.started_at ? new Date(steps[0].started_at).getTime() : 0;
     const stepRows = steps.map(step => {
         const icon = step.conclusion === 'success' ? '✅' :
             step.conclusion === 'failure' ? '❌' :
@@ -30154,17 +30275,25 @@ function formatJobSummary(analysis, jobName, runUrl, steps, triggeredBy, branch,
         const duration = step.started_at && step.completed_at
             ? `${Math.round((new Date(step.completed_at).getTime() - new Date(step.started_at).getTime()) / 1000)}s`
             : '—';
+        const offset = step.started_at && t0
+            ? `+${Math.round((new Date(step.started_at).getTime() - t0) / 1000)}s`
+            : '—';
         const isFailedStep = step.name === analysis.failedStep
             ? ' (failed)'
             : '';
-        return `| ${icon} | \`${step.name}\` | ${step.conclusion ?? 'in progress'} | ${duration} |${isFailedStep}`;
+        return `| ${icon} | \`${step.name}\` | ${offset} | ${duration} | ${step.conclusion ?? 'in progress'} |${isFailedStep}`;
     }).join('\n');
-    // Top 10 error lines only in summary
-    const topErrorLines = analysis.errorLines
-        .slice(0, 10)
-        .join('\n');
     const patternMeta = `Pattern: \`${analysis.matchedPattern}\` · Category: \`${analysis.category}\``;
+    const docsLink = analysis.docsUrl ? ` · [Documentation](${analysis.docsUrl})` : '';
     const exactMatchLine = analysis.exactMatchLine || 'No exact match found';
+    const before = analysis.contextBefore || [];
+    const after = analysis.contextAfter || [];
+    const contextLines = [];
+    before.forEach(line => contextLines.push(`   ${line}`));
+    if (exactMatchLine)
+        contextLines.push(`>>> ${exactMatchLine}`);
+    after.forEach(line => contextLines.push(`   ${line}`));
+    const contextBlock = contextLines.length > 0 ? contextLines.join('\n') : exactMatchLine;
     return `# Log Analyzer Report
 
 ## Summary
@@ -30184,15 +30313,19 @@ function formatJobSummary(analysis, jobName, runUrl, steps, triggeredBy, branch,
 > **Root Cause**
 > ${analysis.rootCause}
 >
-> *${patternMeta}*
+> *${patternMeta}*${docsLink}
 
 **Failed Step:** \`${analysis.failedStep}\`
 
 ### Error Output
 ${analysis.exactMatchLineNumber > 0 ? ` *(line ${analysis.exactMatchLineNumber} of ${analysis.totalLines.toLocaleString()})*` : ''}
 
+\`\`\`text
+${contextBlock}
+\`\`\`
+
 > [!DANGER]
-> ${exactMatchLine}
+> **Error:** \`${exactMatchLine.replace(/`/g, '\\`').replace(/\n/g, ' ')}\`
 
 > [!TIP]
 > **Suggested Fix**
@@ -30200,22 +30333,16 @@ ${analysis.exactMatchLineNumber > 0 ? ` *(line ${analysis.exactMatchLineNumber} 
 
 ---
 
-## Step Breakdown
+## Timeline
 
-| Status | Step | Result | Duration |
-|:------:|:-----|:-------|:---------|
+| Status | Step | Offset | Duration | Result |
+|:------:|:-----|:------:|:--------:|:-------|
 ${stepRows}
 
 ---
 
-## Error Lines (showing 10 of ${analysis.errorLines.length})
-
-\`\`\`text
-${topErrorLines ? topErrorLines.split('\n').map((line, i) => {
-        const isExactMatch = line === analysis.exactMatchLine;
-        return isExactMatch ? `>>> ${line}` : line;
-    }).join('\n') : 'No error lines captured'}
-\`\`\`
+## Error Lines by Category
+${buildGroupedErrorBlockSummary(analysis.errorLinesByCategory || {}, analysis.exactMatchLine, MAX_ERROR_LINES, runUrl, analysis.errorLines.length)}
 
 ---
 
